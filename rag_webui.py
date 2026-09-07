@@ -299,71 +299,71 @@ def generate_report_handler():
 CUSTOM_CSS = """
 #app-header {
   text-align: center;
-  padding: 0.8rem 0 0.2rem 0;
+  padding: 1rem 0 0.4rem 0;
 }
 #app-header h1 {
-  font-size: 2.1rem;
-  font-weight: 800;
+  font-size: 1.7rem;
+  font-weight: 700;
   margin-bottom: 0.2rem;
-  background: linear-gradient(90deg, #4f46e5, #9333ea, #db2777);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  background-clip: text;
+  color: #1e293b;
 }
 #app-header p {
-  color: #6b7280;
-  font-size: 0.95rem;
+  color: #94a3b8;
+  font-size: 0.9rem;
   margin-top: 0;
 }
 .side-card, .chat-card {
-  background: rgba(255,255,255,0.88);
-  border: 1px solid #e5e7eb;
-  border-radius: 16px;
-  padding: 0.8rem 1rem;
-  box-shadow: 0 4px 18px rgba(79,70,229,0.07);
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  padding: 0.7rem 0.9rem;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.05);
 }
 .side-card h3 {
-  color: #4f46e5;
-  font-size: 1.02rem;
-  font-weight: 700;
-  margin: 0.2rem 0 0.7rem 0;
-  padding-bottom: 0.45rem;
-  border-bottom: 2px solid #eef2ff;
+  color: #0f172a;
+  font-size: 0.95rem;
+  font-weight: 600;
+  margin: 0.1rem 0 0.6rem 0;
+  padding-bottom: 0.4rem;
+  border-bottom: 1px solid #f1f5f9;
 }
 body {
-  background: linear-gradient(135deg, #f5f7ff 0%, #eef2ff 55%, #fdf4ff 100%) fixed !important;
+  background: #f8fafc !important;
 }
 .gr-button {
-  border-radius: 10px !important;
-  font-weight: 600 !important;
-  transition: transform 0.1s ease;
-}
-.gr-button:hover {
-  transform: translateY(-1px);
+  border-radius: 8px !important;
+  font-weight: 500 !important;
 }
 footer { display: none !important; }
 """
 
 theme = gr.themes.Soft(
-    primary_hue="indigo",
-    secondary_hue="violet",
+    primary_hue="blue",
     neutral_hue="slate",
     font=[gr.themes.GoogleFont("Inter"), "Microsoft YaHei", "sans-serif"],
 )
 
-with gr.Blocks(title="RAG 知识库问答") as demo:
+with gr.Blocks(title="智安查 · 建造安全智能问答") as demo:
     gr.HTML("""
     <div id="app-header">
-      <h1>📚 RAG 知识库问答</h1>
-      <p>多文档检索增强生成 · 混合检索 · 流式输出 · 来源可追溯</p>
+      <h1>智安查</h1>
+      <p>智慧工地安全规范问答 · 隐患风险分析 · 检查报告</p>
     </div>
     """)
 
     with gr.Row():
-        # 左侧参数面板
-        with gr.Column(scale=1, min_width=300):
+        # 左侧：文档与索引 + 高级参数
+        with gr.Column(scale=1, min_width=280):
             with gr.Group(elem_classes="side-card"):
-                gr.Markdown("### ⚙ 检索参数")
+                gr.Markdown("### 文档与索引")
+                upload_files = gr.File(file_types=[".txt", ".md", ".pdf"], file_count="multiple")
+                upload_info = gr.Textbox(label="上传状态", interactive=False)
+                with gr.Row():
+                    rebuild_btn = gr.Button("重建索引", variant="primary")
+                    clear_btn_2 = gr.Button("清空缓存", variant="secondary")
+                rebuild_info = gr.Textbox(label="索引状态", interactive=False)
+
+            with gr.Accordion("⚙ 高级参数", open=False):
                 chunk_size_slider = gr.Slider(minimum=100, maximum=1000, value=350, step=50, label="Chunk 大小")
                 overlap_slider = gr.Slider(minimum=0, maximum=200, value=60, step=10, label="重叠 Overlap")
                 top_k_slider = gr.Slider(minimum=1, maximum=10, value=3, step=1, label="Top-K 召回")
@@ -375,25 +375,13 @@ with gr.Blocks(title="RAG 知识库问答") as demo:
                     label="检索模式",
                 )
 
-            with gr.Group(elem_classes="side-card"):
-                gr.Markdown("### 🗂 向量库管理")
-                rebuild_btn = gr.Button("重建向量库", variant="primary")
-                clear_btn_2 = gr.Button("清除向量库缓存", variant="secondary")
-                rebuild_info = gr.Textbox(label="状态", interactive=False)
-
-            with gr.Group(elem_classes="side-card"):
-                gr.Markdown("### 📂 上传文档")
-                gr.Markdown("支持 `.txt` / `.md` / `.pdf`，上传后点击上方【重建向量库】")
-                upload_files = gr.File(file_types=[".txt", ".md", ".pdf"], file_count="multiple")
-                upload_info = gr.Textbox(label="上传状态", interactive=False)
-
-        # 右侧聊天区
+        # 右侧：聊天 + 风险分析
         with gr.Column(scale=2):
             with gr.Group(elem_classes="chat-card"):
                 chatbot = gr.Chatbot(height=520, buttons=["copy"])
                 msg_input = gr.Textbox(
                     label="输入问题",
-                    placeholder="请输入你的问题",
+                    placeholder="输入问题，例如：特种作业人员上岗有什么要求？",
                     lines=1
                 )
                 with gr.Row():
