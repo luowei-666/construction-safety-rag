@@ -443,16 +443,21 @@ def docx_to_pdf(docx_path):
 CUSTOM_CSS = """
 #app-header {
   text-align: center;
-  padding: 1rem 0 0.4rem 0;
+  padding: 1.4rem 1rem;
+  background: linear-gradient(135deg, #1d4ed8 0%, #1e40af 100%);
+  border-radius: 12px;
+  margin-bottom: 0.8rem;
+  box-shadow: 0 2px 10px rgba(30, 64, 175, 0.25);
 }
 #app-header h1 {
-  font-size: 1.7rem;
-  font-weight: 700;
+  font-size: 1.9rem;
+  font-weight: 800;
   margin-bottom: 0.2rem;
-  color: #1e293b;
+  color: #ffffff;
+  letter-spacing: 0.12em;
 }
 #app-header p {
-  color: #94a3b8;
+  color: #dbeafe;
   font-size: 0.9rem;
   margin-top: 0;
 }
@@ -464,12 +469,14 @@ CUSTOM_CSS = """
   box-shadow: 0 1px 3px rgba(15, 23, 42, 0.05);
 }
 .side-card h3 {
-  color: #0f172a;
-  font-size: 0.95rem;
-  font-weight: 600;
-  margin: 0.1rem 0 0.6rem 0;
-  padding-bottom: 0.4rem;
-  border-bottom: 1px solid #f1f5f9;
+  color: #ffffff;
+  background: linear-gradient(90deg, #1d4ed8, #2563eb);
+  font-size: 0.98rem;
+  font-weight: 700;
+  margin: 0 0 0.6rem 0;
+  padding: 0.5rem 0.8rem;
+  border-radius: 8px;
+  border-bottom: none;
 }
 body {
   background: #f8fafc !important;
