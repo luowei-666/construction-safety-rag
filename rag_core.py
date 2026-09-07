@@ -126,19 +126,82 @@ def scan_all_docs(folder):
     return file_list
 
 
+# 标题行识别：条款号 / 中文序数章节 / 数字编号 / Markdown 标题
+# （不匹配"（一）（二）"等列表项，避免条款被过度切碎）
+TITLE_RE = re.compile(
+    r"^(第[一二三四五六七八九十百零〇\d]+条"
+    r"|[一二三四五六七八九十]+、"
+    r"|\d+[\.、]"
+    r"|#{1,4}\s)"
+)
+
+
+def _split_long_block(block, chunk_size, overlap):
+    """长块细切：优先在句号/分号后断句，保持语义完整；过短尾片并入前块"""
+    out = []
+    n = len(block)
+    start = 0
+    while start < n:
+        end = min(start + chunk_size, n)
+        if end < n:
+            cut = block.rfind("。", start + chunk_size // 2, end + 1)
+            if cut == -1:
+                cut = block.rfind("；", start + chunk_size // 2, end + 1)
+            if cut != -1:
+                end = cut + 1
+        out.append(block[start:end])
+        next_start = end - overlap
+        if next_start <= start:
+            next_start = start + 1
+        start = next_start
+    if len(out) > 1 and len(out[-1]) < 80:
+        out[-2] += out[-1]
+        out.pop()
+    return out
+
+
 def split_text(text, chunk_size=350, overlap=60):
+    """语义分块：以条款号/章节标题/空行为块边界，标题保留在块首；长块按句号断句。
+
+    相比纯字符切块，避免切断条款原文，使检索命中的引用更完整。
+    """
     text = text.strip()
     if not text:
         return []
+    # 第一遍：按标题行/空行分组为逻辑块
+    logical = []
+    current = []
+    for ln in text.split("\n"):
+        s = ln.strip()
+        if not s:
+            if current:
+                logical.append("\n".join(current))
+                current = []
+            continue
+        if TITLE_RE.match(s) and current:
+            logical.append("\n".join(current))
+            current = []
+        current.append(ln)
+    if current:
+        logical.append("\n".join(current))
+
     chunks = []
-    start = 0
-    total_len = len(text)
-    while start < total_len:
-        end = start + chunk_size
-        chunk = text[start:end]
-        chunks.append(chunk)
-        start = end - overlap
-    return chunks
+    for block in logical:
+        if not block.strip():
+            continue
+        if len(block) <= chunk_size:
+            chunks.append(block)
+        else:
+            chunks.extend(_split_long_block(block, chunk_size, overlap))
+
+    # 合并过小碎片（<60字符且非标题行）到前一块
+    merged = []
+    for c in chunks:
+        if merged and len(c) < 60 and not TITLE_RE.match(c.strip()):
+            merged[-1] += "\n" + c
+        else:
+            merged.append(c)
+    return [c for c in merged if c.strip()]
 
 
 # ---------- 向量库持久化 ----------
@@ -299,6 +362,61 @@ def truncate_messages(history_msgs, max_rounds):
         if len(prev) > limit:
             prev = prev[-limit:]
     return prev + current
+
+
+# ---------- 多模态（现场照片隐患识别） ----------
+def _image_to_data_uri(image_path):
+    """本地图片转 base64 Data URI（供多模态接口使用）"""
+    import base64
+    ext = os.path.splitext(image_path)[1].lower().lstrip(".")
+    mime = {"jpg": "jpeg", "jpeg": "jpeg", "png": "png", "webp": "webp",
+            "bmp": "bmp", "gif": "gif"}.get(ext, "jpeg")
+    with open(image_path, "rb") as f:
+        b64 = base64.b64encode(f.read()).decode("ascii")
+    return f"data:image/{mime};base64,{b64}"
+
+
+def dashscope_vl(messages, model="qwen-vl-plus", timeout=90):
+    """通义千问视觉模型（OpenAI 兼容接口），返回完整回答"""
+    url = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {DASHSCOPE_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    payload = {"model": model, "messages": messages}
+    resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
+    resp.raise_for_status()
+    return resp.json()["choices"][0]["message"]["content"].strip()
+
+
+def describe_image_hazard(image_path):
+    """识别现场照片中的安全隐患，返回文字描述（供检索与风险分析使用）"""
+    data_uri = _image_to_data_uri(image_path)
+    prompt = (
+        "你是施工现场安全检查专家。请仔细观察这张现场照片，用简洁的中文列出其中存在的"
+        "安全隐患（如高处作业不系安全带、临边无防护、基坑边坡失稳、用电不规范、物体堆放"
+        "危险等）。要求：1）只描述照片中可见的事实，不要臆测；2）若有多处隐患逐条列出；"
+        "3）若未发现明显隐患，明确说明'照片中未发现明显安全隐患'。"
+    )
+    messages = [{"role": "user", "content": [
+        {"type": "image_url", "image_url": {"url": data_uri}},
+        {"type": "text", "text": prompt},
+    ]}]
+    return dashscope_vl(messages)
+
+
+def analyze_image_risk(image_path, index, chunks_with_source, bm25, top_k=5,
+                       dist_threshold=0.85, use_hybrid=True, weight_bm25=0.25):
+    """现场照片隐患分析：先视觉识别隐患描述，再走规范检索 + 结构化风险分析。
+
+    返回 analyze_risk 的结果，并附带 _image_desc（视觉识别出的隐患描述）。
+    """
+    desc = describe_image_hazard(image_path)
+    result = analyze_risk(desc, index, chunks_with_source, bm25,
+                          top_k=top_k, dist_threshold=dist_threshold,
+                          use_hybrid=use_hybrid, weight_bm25=weight_bm25)
+    result["_image_desc"] = desc
+    return result
 
 
 # ---------- 隐患风险结构化分析 ----------

@@ -1,0 +1,13 @@
+.env
+.git
+__pycache__/
+*.pyc
+faiss_index.bin
+chunks.pkl
+meta.pkl
+bm25_index.pkl
+chat_history_export.md
+safety_check_report.md
+docs/_archive/
+test_set.json
+demo_images/

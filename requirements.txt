@@ -1,0 +1,13 @@
+# 智安查 —— 智慧工地安全规范智能问答与风险预警助手
+# 安装：pip install -r requirements.txt
+faiss-cpu>=1.7.4
+numpy>=1.24
+requests>=2.31
+python-dotenv>=1.0
+PyPDF2>=3.0
+jieba>=0.42.1
+rank-bm25>=0.2.2
+gradio>=6.0
+# 报告 Word/PDF 输出（PDF 依赖本机安装 Microsoft Word/WPS）
+python-docx>=1.1
+pywin32>=306; sys_platform == "win32"

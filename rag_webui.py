@@ -19,6 +19,7 @@ from rag_core import (
     truncate_messages,
     dashscope_chat_stream,
     analyze_risk,
+    analyze_image_risk,
     DASHSCOPE_API_KEY,
 )
 
@@ -174,18 +175,47 @@ RISK_LEVEL_BADGE = {
 }
 
 
-def risk_analysis_handler(message, top_k, dist_threshold, mode_value):
+# ---------- 知识库文件管理 ----------
+def list_docs_handler():
+    """列出 docs 目录下的知识库文档"""
+    if not os.path.exists(DOC_FOLDER):
+        return gr.Dropdown(choices=[], value=None)
+    files = sorted(f for f in os.listdir(DOC_FOLDER)
+                   if f.lower().endswith((".txt", ".md", ".pdf")))
+    return gr.Dropdown(choices=files, value=files[0] if files else None)
+
+
+def delete_doc_handler(fname):
+    """删除选中的知识库文档（提示重建索引生效）"""
+    if not fname:
+        return list_docs_handler(), "请先在下拉框选择要删除的文档。"
+    path = os.path.join(DOC_FOLDER, fname)
+    if os.path.exists(path):
+        os.remove(path)
+        return list_docs_handler(), f"已删除：{fname}，请点击【重建索引】使索引更新。"
+    return list_docs_handler(), f"文件不存在：{fname}"
+
+
+def risk_analysis_handler(message, image_path, top_k, dist_threshold, mode_value):
     global g_index, g_chunks_with_source, g_bm25
     if g_index is None:
         return "⚠️ 向量库未初始化，请先上传文档并重建向量库。"
-    if not message or not message.strip():
-        return "请先描述施工现场情况，例如：六米深的基坑没有做专项施工方案就直接开挖，坑边堆土很近。"
+    if (not message or not message.strip()) and not image_path:
+        return "请描述施工现场情况，或上传现场照片。"
     use_hybrid = mode_map(mode_value)
     try:
-        result = analyze_risk(
-            message, g_index, g_chunks_with_source, g_bm25,
-            top_k=top_k, dist_threshold=dist_threshold, use_hybrid=use_hybrid,
-        )
+        if image_path:
+            result = analyze_image_risk(
+                image_path, g_index, g_chunks_with_source, g_bm25,
+                top_k=top_k, dist_threshold=dist_threshold, use_hybrid=use_hybrid,
+            )
+            image_desc = result.get("_image_desc", "")
+            message = f"{message.strip()}\n【照片识别】{image_desc}".strip()
+        else:
+            result = analyze_risk(
+                message, g_index, g_chunks_with_source, g_bm25,
+                top_k=top_k, dist_threshold=dist_threshold, use_hybrid=use_hybrid,
+            )
     except Exception as e:
         print(f"风险分析异常: {e}")
         return f"❌ 分析失败：{e}"
@@ -193,6 +223,8 @@ def risk_analysis_handler(message, top_k, dist_threshold, mode_value):
     level = result.get("risk_level", "无法判断")
     badge = RISK_LEVEL_BADGE.get(level, f"⚪ {level}")
     lines = [f"### {badge}"]
+    if image_path and result.get("_image_desc"):
+        lines.append(f"\n**照片识别**：{result['_image_desc']}")
     summary = result.get("summary", "")
     if summary:
         lines.append(f"\n**风险分析**：{summary}")
@@ -285,30 +317,19 @@ def render_risk_report(records, now):
 
 
 def generate_report_handler():
-    """把本次会话的风险分析记录汇总为《施工安全检查报告》，输出 Markdown + Word + PDF"""
+    """把本次会话的风险分析记录汇总为《施工安全检查报告》，输出 PDF"""
     if not risk_records:
         return None, "暂无可生成报告的隐患分析记录，请先进行风险分析。"
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    text = render_risk_report(risk_records, now)
-    md_path = os.path.join(os.getcwd(), RISK_REPORT_FILE)
-    with open(md_path, "w", encoding="utf-8") as f:
-        f.write(text)
-
-    outputs = [md_path]
-    notes = ["Markdown"]
     try:
         docx_path = render_risk_report_docx(risk_records, now)
-        outputs.append(docx_path)
-        notes.append("Word")
-        try:
-            pdf_path = docx_to_pdf(docx_path)
-            outputs.append(pdf_path)
-            notes.append("PDF")
-        except Exception as e:
-            print(f"PDF转换跳过: {e}")
+        pdf_path = docx_to_pdf(docx_path)
+        if os.path.exists(docx_path):
+            os.remove(docx_path)  # 仅保留 PDF
+        return pdf_path, f"安全检查报告（PDF）已生成：{os.path.basename(pdf_path)}"
     except Exception as e:
-        print(f"Word生成失败: {e}")
-    return outputs, f"安全检查报告已生成：{' + '.join(notes)}"
+        print(f"报告生成失败: {e}")
+        return None, f"报告生成失败：{e}"
 
 
 def render_risk_report_docx(records, now):
@@ -481,6 +502,10 @@ with gr.Blocks(title="智安查 · 建造安全智能问答") as demo:
                 gr.Markdown("### 文档与索引")
                 upload_files = gr.File(file_types=[".txt", ".md", ".pdf"], file_count="multiple")
                 upload_info = gr.Textbox(label="上传状态", interactive=False)
+                doc_list = gr.Dropdown(label="知识库文档", choices=[], interactive=True)
+                with gr.Row():
+                    refresh_docs_btn = gr.Button("刷新列表", variant="secondary")
+                    delete_doc_btn = gr.Button("删除所选", variant="secondary")
                 with gr.Row():
                     rebuild_btn = gr.Button("重建索引", variant="primary")
                     clear_btn_2 = gr.Button("清空缓存", variant="secondary")
@@ -514,15 +539,16 @@ with gr.Blocks(title="智安查 · 建造安全智能问答") as demo:
 
             with gr.Accordion("🔍 隐患风险分析（结构化输出）", open=False):
                 risk_input = gr.Textbox(
-                    label="描述施工现场情况",
+                    label="描述施工现场情况（文字或照片二选一/可并用）",
                     placeholder="例如：六米深的基坑没有做专项施工方案就直接开挖，坑边堆土很近",
                     lines=2,
                 )
+                risk_image = gr.Image(type="filepath", label="现场照片（可选，自动识别隐患）")
                 risk_btn = gr.Button("开始风险分析", variant="primary")
                 risk_output = gr.Markdown()
                 with gr.Row():
                     report_btn = gr.Button("生成安全检查报告", variant="secondary")
-                    report_file = gr.Files(label="下载报告（Markdown / Word / PDF）")
+                    report_file = gr.File(label="下载报告（PDF）")
 
     # 事件绑定
     def mode_map(x):
@@ -539,9 +565,12 @@ with gr.Blocks(title="智安查 · 建造安全智能问答") as demo:
     )
     clear_btn.click(lambda: [], None, chatbot)
     export_btn.click(export_chat_handler, inputs=[chatbot], outputs=[export_file, rebuild_info])
+    refresh_docs_btn.click(list_docs_handler, outputs=doc_list)
+    delete_doc_btn.click(delete_doc_handler, inputs=doc_list, outputs=[doc_list, rebuild_info])
+    demo.load(list_docs_handler, outputs=doc_list)
     risk_btn.click(
         risk_analysis_handler,
-        inputs=[risk_input, top_k_slider, dist_slider, mode_dropdown],
+        inputs=[risk_input, risk_image, top_k_slider, dist_slider, mode_dropdown],
         outputs=[risk_output],
     )
     report_btn.click(generate_report_handler, outputs=[report_file, risk_output])
