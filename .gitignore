@@ -1,0 +1,20 @@
+# 环境与密钥（绝不提交）
+.env
+
+# Python
+__pycache__/
+*.pyc
+
+# 向量库与检索缓存（可重建）
+faiss_index.bin
+chunks.pkl
+meta.pkl
+bm25_index.pkl
+
+# 生成产物
+chat_history_export.md
+safety_check_report.md
+
+# 含个人隐私的旧资料（勿公开）
+docs/_archive/
+test_set.json
