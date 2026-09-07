@@ -285,15 +285,138 @@ def render_risk_report(records, now):
 
 
 def generate_report_handler():
-    """把本次会话的风险分析记录汇总为《施工安全检查报告》Markdown"""
+    """把本次会话的风险分析记录汇总为《施工安全检查报告》，输出 Markdown + Word + PDF"""
     if not risk_records:
         return None, "暂无可生成报告的隐患分析记录，请先进行风险分析。"
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     text = render_risk_report(risk_records, now)
-    report_path = os.path.join(os.getcwd(), RISK_REPORT_FILE)
-    with open(report_path, "w", encoding="utf-8") as f:
+    md_path = os.path.join(os.getcwd(), RISK_REPORT_FILE)
+    with open(md_path, "w", encoding="utf-8") as f:
         f.write(text)
-    return report_path, f"安全检查报告已生成：{RISK_REPORT_FILE}"
+
+    outputs = [md_path]
+    notes = ["Markdown"]
+    try:
+        docx_path = render_risk_report_docx(risk_records, now)
+        outputs.append(docx_path)
+        notes.append("Word")
+        try:
+            pdf_path = docx_to_pdf(docx_path)
+            outputs.append(pdf_path)
+            notes.append("PDF")
+        except Exception as e:
+            print(f"PDF转换跳过: {e}")
+    except Exception as e:
+        print(f"Word生成失败: {e}")
+    return outputs, f"安全检查报告已生成：{' + '.join(notes)}"
+
+
+def render_risk_report_docx(records, now):
+    """把风险分析记录渲染为《施工安全检查报告》Word 文档（python-docx）"""
+    from docx import Document
+    from docx.shared import Pt, Cm, RGBColor
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+    doc = Document()
+    # 页面边距
+    for sec in doc.sections:
+        sec.top_margin = Cm(2.2)
+        sec.bottom_margin = Cm(2.2)
+        sec.left_margin = Cm(2.5)
+        sec.right_margin = Cm(2.5)
+
+    # 标题
+    title = doc.add_heading("施工安全检查报告（AI 辅助生成）", level=0)
+    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+    # 说明
+    p = doc.add_paragraph()
+    r = p.add_run(f"报告生成时间：{now}\n生成方式：本系统基于规范知识库混合检索 + 大模型结构化分析自动生成，供现场检查参考，最终结论以专业人员复核为准。")
+    r.font.size = Pt(9)
+    r.font.color.rgb = RGBColor(0x66, 0x66, 0x66)
+
+    # 一、检查基本信息
+    doc.add_heading("一、检查基本信息", level=1)
+    base_rows = [
+        ("项目名称", "（待填写）"),
+        ("施工单位", "（待填写）"),
+        ("检查部位/工序", "（待填写）"),
+        ("检查时间", now),
+        ("隐患分析条数", f"{len(records)} 条"),
+    ]
+    t1 = doc.add_table(rows=len(base_rows), cols=2)
+    t1.style = "Table Grid"
+    for i, (k, v) in enumerate(base_rows):
+        t1.cell(i, 0).text = k
+        t1.cell(i, 1).text = v
+
+    # 二、隐患清单
+    doc.add_heading("二、隐患清单", level=1)
+    t2 = doc.add_table(rows=1 + len(records), cols=4)
+    t2.style = "Table Grid"
+    hdr = t2.rows[0].cells
+    for j, htext in enumerate(["序号", "隐患描述", "风险等级", "涉及规范来源"]):
+        hdr[j].text = htext
+    for i, rec in enumerate(records, 1):
+        cells = t2.rows[i].cells
+        cells[0].text = str(i)
+        cells[1].text = rec["desc"]
+        cells[2].text = rec["level"]
+        cells[3].text = "、".join(rec["sources"]) if rec["sources"] else "-"
+
+    # 三、隐患详情与整改要求
+    doc.add_heading("三、隐患详情与整改要求", level=1)
+    for i, rec in enumerate(records, 1):
+        doc.add_heading(f"隐患 {i}：{rec['desc']}", level=2)
+        doc.add_paragraph(f"风险等级：{rec['level']}")
+        doc.add_paragraph(f"风险分析：{rec['summary']}")
+        if rec["evidence"]:
+            doc.add_paragraph("依据条款：")
+            for e in rec["evidence"]:
+                doc.add_paragraph(e, style="List Bullet")
+        if rec["suggestions"]:
+            doc.add_paragraph("整改建议：")
+            for s in rec["suggestions"]:
+                doc.add_paragraph(s, style="List Bullet")
+
+    # 四、检查结论
+    doc.add_heading("四、检查结论", level=1)
+    serious = sum(1 for r in records if r["level"] == "重大隐患")
+    if serious:
+        doc.add_paragraph(
+            f"本次检查共发现隐患 {len(records)} 条，其中重大隐患 {serious} 条。"
+            "重大隐患应立即停工整改，整改完成经验收合格后方可复工；其余隐患应限期整改。")
+    else:
+        doc.add_paragraph(f"本次检查共发现隐患 {len(records)} 条，均为一般隐患，应限期整改并复查闭环。")
+
+    # 五、签字确认
+    doc.add_heading("五、签字确认", level=1)
+    t3 = doc.add_table(rows=4, cols=3)
+    t3.style = "Table Grid"
+    for j, htext in enumerate(["角色", "签字", "日期"]):
+        t3.rows[0].cells[j].text = htext
+    for i, role in enumerate(["检查人", "整改责任人", "复查人"], 1):
+        t3.rows[i].cells[0].text = role
+
+    docx_path = os.path.join(os.getcwd(), "safety_check_report.docx")
+    doc.save(docx_path)
+    return docx_path
+
+
+def docx_to_pdf(docx_path):
+    """用本机 Word 将 docx 转为 PDF（Word COM）"""
+    import win32com.client
+    word = win32com.client.Dispatch("Word.Application")
+    word.Visible = False
+    try:
+        word.DisplayAlerts = 0
+        doc = word.Documents.Open(docx_path, ReadOnly=True)
+        pdf_path = os.path.splitext(docx_path)[0] + ".pdf"
+        doc.SaveAs2(pdf_path, FileFormat=17)  # 17 = wdFormatPDF
+        doc.Close(False)
+        return pdf_path
+    finally:
+        word.Quit()
 
 
 CUSTOM_CSS = """
@@ -399,7 +522,7 @@ with gr.Blocks(title="智安查 · 建造安全智能问答") as demo:
                 risk_output = gr.Markdown()
                 with gr.Row():
                     report_btn = gr.Button("生成安全检查报告", variant="secondary")
-                    report_file = gr.File(label="下载安全检查报告")
+                    report_file = gr.Files(label="下载报告（Markdown / Word / PDF）")
 
     # 事件绑定
     def mode_map(x):
