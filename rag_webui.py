@@ -4,6 +4,7 @@
 上下文窗口限制、对话导出、检索模式切换。
 """
 import os
+import re
 import shutil
 import datetime
 import gradio as gr
@@ -35,6 +36,27 @@ g_index = None
 g_chunks_with_source = None
 g_bm25 = None
 risk_records = []  # 本次会话的风险分析记录，用于生成安全检查报告
+
+
+def extract_clause(text):
+    """从条款文本中提取'第X条'，用于引用标题展示"""
+    m = re.search(r"第[一二三四五六七八九十百零0-9.]+条", text)
+    return m.group(0) if m else ""
+
+
+def highlight_keywords(text, query, max_len=250):
+    """在检索片段中高亮 query 的关键词（Markdown 加粗），返回截断后的高亮文本"""
+    import jieba
+
+    stop = set("的了是在和与及等个这那为对于或并且被把从向以我你他她它们之按上")
+    words = [w for w in jieba.lcut(query) if len(w) >= 2 and w not in stop]
+    words = sorted(set(words), key=len, reverse=True)
+    snippet = text if len(text) <= max_len else text[:max_len]
+    for w in words:
+        if f"**{w}**" in snippet:
+            continue  # 已高亮过，避免嵌套
+        snippet = snippet.replace(w, f"**{w}**")
+    return snippet
 
 
 def chat_handler(message, chat_history, top_k, dist_threshold, max_rounds, use_hybrid, use_rerank):
@@ -70,7 +92,10 @@ def chat_handler(message, chat_history, top_k, dist_threshold, max_rounds, use_h
         else:
             source_text = ""
             for idx, item in enumerate(final_hits):
-                source_text += f"\n---\n**来源：{item['source']}**\n> {item['text'][:250]}"
+                clause = extract_clause(item["text"])
+                title = f"`{item['source']}`" + (f" · {clause}" if clause else "")
+                snippet = highlight_keywords(item["text"], rewritten_q)
+                source_text += f"\n---\n📌 **依据条款**：{title}\n> {snippet}"
             context_parts = [item["text"] for item in final_hits]
             context = "\n---\n".join(context_parts)
             sys_content = f"""基于下面参考文档回答用户问题，只使用文档内信息。不知道就直接说不知道，禁止编造。
@@ -235,7 +260,7 @@ def risk_analysis_handler(message, image_path, top_k, dist_threshold, mode_value
     if evidence:
         lines.append("\n**依据条款**：")
         for e in evidence:
-            lines.append(f"- {e}")
+            lines.append(f"- {highlight_keywords(e, message)}")
     suggestions = result.get("suggestions", [])
     if suggestions:
         lines.append("\n**整改建议**：")
