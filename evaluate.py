@@ -27,7 +27,7 @@ def cosine(a, b):
     return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-9))
 
 
-def run_eval(index, chunks, bm25, test_set, top_k, use_hybrid, dist_threshold):
+def run_eval(index, chunks, bm25, test_set, top_k, use_hybrid, dist_threshold, use_rerank=False):
     """对测试集跑一次检索评估，返回 (hit_at, per_item)"""
     total = len(test_set)
     hit_at = {k: 0 for k in (1, 3, 5)}
@@ -38,6 +38,7 @@ def run_eval(index, chunks, bm25, test_set, top_k, use_hybrid, dist_threshold):
         hits = hybrid_search(
             index, chunks, bm25, q,
             top_k=top_k, dist_threshold=dist_threshold, use_hybrid=use_hybrid,
+            use_rerank=use_rerank,
         )
         hit_sources = [h["source"] for h in hits]
         for k in (1, 3, 5):
@@ -123,30 +124,36 @@ def main():
         test_set = json.load(f)
 
     if args.compare:
-        print("\n>>> 模式对比：混合检索 vs 纯向量检索")
+        print("\n>>> 模式对比：纯向量 / 混合检索 / 混合+Rerank（消融实验）")
         hit_hybrid, per_hybrid, total = run_eval(
             index, chunks, bm25, test_set, args.top_k, True, args.threshold)
         hit_vector, per_vector, _ = run_eval(
             index, chunks, bm25, test_set, args.top_k, False, args.threshold)
+        hit_rerank, per_rerank, _ = run_eval(
+            index, chunks, bm25, test_set, args.top_k, True, args.threshold,
+            use_rerank=True)
 
         print("\n" + "=" * 56)
         print("  Recall@k 对比")
         print("=" * 56)
-        print(f"  {'指标':<10}{'混合检索':>12}{'纯向量':>12}{'差异':>10}")
+        print(f"  {'指标':<10}{'纯向量':>12}{'混合':>12}{'混合+Rerank':>16}")
         for k in (1, 3, 5):
-            a = hit_hybrid[k] / total
-            b = hit_vector[k] / total
-            print(f"  {'Recall@' + str(k):<10}{a:>12.2%}{b:>12.2%}{a - b:>+10.2%}")
+            a = hit_vector[k] / total
+            b = hit_hybrid[k] / total
+            c = hit_rerank[k] / total
+            print(f"  {'Recall@' + str(k):<10}{a:>12.2%}{b:>12.2%}{c:>16.2%}")
 
         print("\n  逐题命中对比（✓=命中 ✗=未命中）:")
-        print(f"  {'#':<4}{'混合':<6}{'向量':<6} 问题")
-        for i, (ph, pv) in enumerate(zip(per_hybrid, per_vector), 1):
-            mh = "✓" if ph["hit"] else "✗"
+        print(f"  {'#':<4}{'向量':<6}{'混合':<6}{'+Rerank':<10} 问题")
+        for i, (pv, ph, pr) in enumerate(zip(per_vector, per_hybrid, per_rerank), 1):
             mv = "✓" if pv["hit"] else "✗"
-            print(f"  {i:<4}{mh:<6}{mv:<6} {ph['question']}")
-            if mh != mv:
-                print(f"       混合召回: {ph['retrieved']}")
+            mh = "✓" if ph["hit"] else "✗"
+            mr = "✓" if pr["hit"] else "✗"
+            print(f"  {i:<4}{mv:<6}{mh:<6}{mr:<10} {ph['question']}")
+            if len({mv, mh, mr}) > 1:
                 print(f"       向量召回: {pv['retrieved']}")
+                print(f"       混合召回: {ph['retrieved']}")
+                print(f"       Rerank召回: {pr['retrieved']}")
 
         if args.with_answer:
             answer_quality(index, chunks, bm25, test_set, args.threshold, use_hybrid=True)

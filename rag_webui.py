@@ -37,7 +37,7 @@ g_bm25 = None
 risk_records = []  # 本次会话的风险分析记录，用于生成安全检查报告
 
 
-def chat_handler(message, chat_history, top_k, dist_threshold, max_rounds, use_hybrid):
+def chat_handler(message, chat_history, top_k, dist_threshold, max_rounds, use_hybrid, use_rerank):
     global g_index, g_chunks_with_source, g_bm25
     try:
         if g_index is None:
@@ -60,8 +60,9 @@ def chat_handler(message, chat_history, top_k, dist_threshold, max_rounds, use_h
             rewritten_q, top_k=top_k,
             dist_threshold=dist_threshold,
             use_hybrid=use_hybrid,
+            use_rerank=use_rerank,
         )
-        print(f"召回数量: {len(final_hits)} (模式: {'混合' if use_hybrid else '纯向量'})")
+        print(f"召回数量: {len(final_hits)} (模式: {'混合' if use_hybrid else '纯向量'}{'+Rerank' if use_rerank else ''})")
 
         if len(final_hits) == 0:
             source_text = "\n> 无匹配文档片段"
@@ -196,7 +197,7 @@ def delete_doc_handler(fname):
     return list_docs_handler(), f"文件不存在：{fname}"
 
 
-def risk_analysis_handler(message, image_path, top_k, dist_threshold, mode_value):
+def risk_analysis_handler(message, image_path, top_k, dist_threshold, mode_value, use_rerank):
     global g_index, g_chunks_with_source, g_bm25
     if g_index is None:
         return "⚠️ 向量库未初始化，请先上传文档并重建向量库。"
@@ -208,6 +209,7 @@ def risk_analysis_handler(message, image_path, top_k, dist_threshold, mode_value
             result = analyze_image_risk(
                 image_path, g_index, g_chunks_with_source, g_bm25,
                 top_k=top_k, dist_threshold=dist_threshold, use_hybrid=use_hybrid,
+                use_rerank=use_rerank,
             )
             image_desc = result.get("_image_desc", "")
             message = f"{message.strip()}\n【照片识别】{image_desc}".strip()
@@ -215,6 +217,7 @@ def risk_analysis_handler(message, image_path, top_k, dist_threshold, mode_value
             result = analyze_risk(
                 message, g_index, g_chunks_with_source, g_bm25,
                 top_k=top_k, dist_threshold=dist_threshold, use_hybrid=use_hybrid,
+                use_rerank=use_rerank,
             )
     except Exception as e:
         print(f"风险分析异常: {e}")
@@ -251,6 +254,7 @@ def risk_analysis_handler(message, image_path, top_k, dist_threshold, mode_value
         "evidence": evidence,
         "suggestions": suggestions,
         "sources": sorted(set(sources)),
+        "image_path": image_path if image_path else None,
     })
     return "\n".join(lines)
 
@@ -389,6 +393,20 @@ def render_risk_report_docx(records, now):
     doc.add_heading("三、隐患详情与整改要求", level=1)
     for i, rec in enumerate(records, 1):
         doc.add_heading(f"隐患 {i}：{rec['desc']}", level=2)
+        # 现场照片（如有，先用 PIL 转码为标准 JPEG 再嵌入）
+        img = rec.get("image_path")
+        if img and os.path.exists(img):
+            try:
+                from PIL import Image as PILImage
+                import tempfile
+                tmp = os.path.join(tempfile.gettempdir(), f"report_img_{i}.jpg")
+                PILImage.open(img).convert("RGB").save(tmp, "JPEG", quality=90)
+                doc.add_picture(tmp, width=Cm(14))
+                if os.path.exists(tmp):
+                    os.remove(tmp)
+                doc.add_paragraph("▲ 现场照片")
+            except Exception as e:
+                print(f"图片嵌入跳过: {e}")
         doc.add_paragraph(f"风险等级：{rec['level']}")
         doc.add_paragraph(f"风险分析：{rec['summary']}")
         if rec["evidence"]:
@@ -529,6 +547,10 @@ with gr.Blocks(title="智安查 · 建造安全智能问答") as demo:
                     value="混合检索（向量+关键词）",
                     label="检索模式",
                 )
+                rerank_checkbox = gr.Checkbox(
+                    label="启用 Rerank 重排（更精准，稍慢）",
+                    value=True,
+                )
 
         # 右侧：聊天 + 风险分析
         with gr.Column(scale=2):
@@ -567,7 +589,7 @@ with gr.Blocks(title="智安查 · 建造安全智能问答") as demo:
 
     msg_input.submit(
         fn=chat_handler,
-        inputs=[msg_input, chatbot, top_k_slider, dist_slider, max_rounds_slider, mode_dropdown],
+        inputs=[msg_input, chatbot, top_k_slider, dist_slider, max_rounds_slider, mode_dropdown, rerank_checkbox],
         outputs=[chatbot, msg_input]
     )
     clear_btn.click(lambda: [], None, chatbot)
@@ -577,7 +599,7 @@ with gr.Blocks(title="智安查 · 建造安全智能问答") as demo:
     demo.load(list_docs_handler, outputs=doc_list)
     risk_btn.click(
         risk_analysis_handler,
-        inputs=[risk_input, risk_image, top_k_slider, dist_slider, mode_dropdown],
+        inputs=[risk_input, risk_image, top_k_slider, dist_slider, mode_dropdown, rerank_checkbox],
         outputs=[risk_output],
     )
     report_btn.click(generate_report_handler, outputs=[report_file, risk_output])

@@ -73,6 +73,25 @@ def dashscope_chat(messages):
     return j["output"]["choices"][0]["message"]["content"].strip()
 
 
+def dashscope_rerank(query, documents, top_n=5, model="gte-rerank-v2"):
+    """通义千问 Rerank 重排：返回按相关性降序的候选索引列表与分数"""
+    url = "https://dashscope.aliyuncs.com/api/v1/services/rerank/text-rerank/text-rerank"
+    headers = {
+        "Authorization": f"Bearer {DASHSCOPE_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": model,
+        "input": {"query": query, "documents": documents},
+        "parameters": {"top_n": top_n},
+    }
+    resp = requests.post(url, headers=headers, json=payload, timeout=40)
+    resp.raise_for_status()
+    results = resp.json()["output"]["results"]
+    results.sort(key=lambda x: x["relevance_score"], reverse=True)
+    return [r["index"] for r in results], results
+
+
 def dashscope_chat_stream(messages):
     """流式调用，逐字返回"""
     url = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation"
@@ -304,11 +323,12 @@ def build_vector_from_docs(chunk_size=350, overlap=60, force_rebuild=False):
 
 # ---------- 混合检索 ----------
 def hybrid_search(index, chunks_with_source, bm25, query, top_k=3,
-                  dist_threshold=0.85, use_hybrid=True, weight_bm25=0.25):
-    """混合检索：向量召回 + BM25 关键词召回，RRF 融合排序。
+                  dist_threshold=0.85, use_hybrid=True, weight_bm25=0.25,
+                  use_rerank=False):
+    """混合检索：向量召回 + BM25 关键词召回，RRF 融合排序；可选 Rerank 重排。
 
-    use_hybrid=False 时仅用向量检索。
-    返回: [{source, text, score}, ...]，score 为 RRF 融合分（混合）或 L2 距离（纯向量）。
+    use_hybrid=False 时仅用向量检索；use_rerank=True 时对融合候选做 gte-rerank-v2 重排。
+    返回: [{source, text, score}, ...]
     """
     # 向量路
     q_emb = np.array([dashscope_embedding(query)], dtype=np.float32)
@@ -341,9 +361,26 @@ def hybrid_search(index, chunks_with_source, bm25, query, top_k=3,
     for rank, (i, _) in enumerate(bm25_hits):
         rrf[i] = rrf.get(i, 0.0) + weight_bm25 / (K + rank + 1)
 
-    merged = sorted(rrf.items(), key=lambda x: x[1], reverse=True)[:top_k]
+    merged = sorted(rrf.items(), key=lambda x: x[1], reverse=True)
+
+    # 可选：Rerank 重排（对融合候选做相关性精排）
+    if use_rerank and len(merged) > 1:
+        candidates = merged[:max(top_k * 3, 10)]
+        docs = [chunks_with_source[i]["text"] for i, _ in candidates]
+        try:
+            order, _ = dashscope_rerank(query, docs, top_n=min(top_k, len(docs)))
+            result = []
+            for rank, idx in enumerate(order[:top_k]):
+                i, s = candidates[idx]
+                item = dict(chunks_with_source[i])
+                item["score"] = s
+                result.append(item)
+            return result
+        except Exception as e:
+            print(f"Rerank 降级到 RRF: {e}")
+
     result = []
-    for i, s in merged:
+    for i, s in merged[:top_k]:
         item = dict(chunks_with_source[i])
         item["score"] = s
         result.append(item)
@@ -406,7 +443,8 @@ def describe_image_hazard(image_path):
 
 
 def analyze_image_risk(image_path, index, chunks_with_source, bm25, top_k=5,
-                       dist_threshold=0.85, use_hybrid=True, weight_bm25=0.25):
+                       dist_threshold=0.85, use_hybrid=True, weight_bm25=0.25,
+                       use_rerank=False):
     """现场照片隐患分析：先视觉识别隐患描述，再走规范检索 + 结构化风险分析。
 
     返回 analyze_risk 的结果，并附带 _image_desc（视觉识别出的隐患描述）。
@@ -414,22 +452,25 @@ def analyze_image_risk(image_path, index, chunks_with_source, bm25, top_k=5,
     desc = describe_image_hazard(image_path)
     result = analyze_risk(desc, index, chunks_with_source, bm25,
                           top_k=top_k, dist_threshold=dist_threshold,
-                          use_hybrid=use_hybrid, weight_bm25=weight_bm25)
+                          use_hybrid=use_hybrid, weight_bm25=weight_bm25,
+                          use_rerank=use_rerank)
     result["_image_desc"] = desc
     return result
 
 
 # ---------- 隐患风险结构化分析 ----------
 def analyze_risk(question, index, chunks_with_source, bm25, top_k=5,
-                 dist_threshold=0.85, use_hybrid=True, weight_bm25=0.25):
+                 dist_threshold=0.85, use_hybrid=True, weight_bm25=0.25,
+                 use_rerank=False):
     """对施工现场隐患描述做结构化风险分析（决策辅助层）。
 
-    流程：混合检索规范条款 → LLM 按固定 JSON 结构输出风险等级/依据/整改建议。
+    流程：混合检索规范条款（可选 Rerank 重排）→ LLM 按固定 JSON 结构输出风险等级/依据/整改建议。
     返回 dict: {risk_level, summary, evidence: [], suggestions: [], _sources: []}
     """
     hits = hybrid_search(index, chunks_with_source, bm25, question,
                          top_k=top_k, dist_threshold=dist_threshold,
-                         use_hybrid=use_hybrid, weight_bm25=weight_bm25)
+                         use_hybrid=use_hybrid, weight_bm25=weight_bm25,
+                         use_rerank=use_rerank)
     if not hits:
         return {
             "risk_level": "无法判断",
