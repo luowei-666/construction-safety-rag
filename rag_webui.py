@@ -222,7 +222,7 @@ def delete_doc_handler(fname):
     return list_docs_handler(), f"文件不存在：{fname}"
 
 
-def risk_analysis_handler(message, image_path, top_k, dist_threshold, mode_value, use_rerank):
+def risk_analysis_handler(message, image_path, owner, deadline, top_k, dist_threshold, mode_value, use_rerank):
     global g_index, g_chunks_with_source, g_bm25
     if g_index is None:
         return "⚠️ 向量库未初始化，请先上传文档并重建向量库。"
@@ -270,7 +270,7 @@ def risk_analysis_handler(message, image_path, top_k, dist_threshold, mode_value
     if sources:
         lines.append("\n> 引用来源：" + "、".join(f"`{s}`" for s in sorted(set(sources))))
 
-    # 记录到会话报告（供"生成安全检查报告"使用）
+    # 记录到会话台账（供生成安全检查报告/整改通知单/统计使用）
     risk_records.append({
         "time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "desc": message.strip(),
@@ -280,6 +280,9 @@ def risk_analysis_handler(message, image_path, top_k, dist_threshold, mode_value
         "suggestions": suggestions,
         "sources": sorted(set(sources)),
         "image_path": image_path if image_path else None,
+        "status": "待整改",
+        "owner": (owner or "").strip() or "未指定",
+        "deadline": (deadline or "").strip() or "未指定",
     })
     return "\n".join(lines)
 
@@ -483,6 +486,265 @@ def docx_to_pdf(docx_path):
         word.Quit()
 
 
+# ---------- 隐患闭环管理（台账 / 状态流转 / 整改通知单） ----------
+LEDGER_HEADERS = ["序号", "时间", "隐患描述", "风险等级", "状态", "责任人", "期限"]
+
+
+def ledger_df():
+    """把风险记录渲染为台账 DataFrame"""
+    import pandas as pd
+    if not risk_records:
+        return pd.DataFrame([], columns=LEDGER_HEADERS)
+    return pd.DataFrame([{
+        "序号": i + 1,
+        "时间": r["time"][5:16],
+        "隐患描述": (r["desc"] or "")[:36],
+        "风险等级": r["level"],
+        "状态": r.get("status", "待整改"),
+        "责任人": r.get("owner") or "-",
+        "期限": r.get("deadline") or "-",
+    } for i, r in enumerate(risk_records)])
+
+
+def record_choices():
+    return [f"#{i + 1} {(r['desc'] or '')[:30]}" for i, r in enumerate(risk_records)]
+
+
+def refresh_ledger_handler():
+    return ledger_df(), gr.Dropdown(choices=record_choices(), value=None)
+
+
+def update_status_handler(sel, new_status):
+    """隐患台账状态流转：待整改 → 复查中 → 已整改"""
+    if sel is None:
+        return ledger_df(), "请先在台账下拉框选择要更新的隐患记录。"
+    idx = int(str(sel).split(" ")[0].lstrip("#"))
+    if 1 <= idx <= len(risk_records):
+        risk_records[idx - 1]["status"] = new_status
+        return ledger_df(), f"✅ 记录 #{idx} 状态已更新为：{new_status}"
+    return ledger_df(), "记录不存在，请刷新台账。"
+
+
+def render_notice_docx(records, now):
+    """把待整改隐患渲染为《施工安全隐患整改通知单》Word 文档"""
+    from docx import Document
+    from docx.shared import Pt, Cm, RGBColor
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+    doc = Document()
+    for sec in doc.sections:
+        sec.top_margin = Cm(2.2)
+        sec.bottom_margin = Cm(2.2)
+        sec.left_margin = Cm(2.5)
+        sec.right_margin = Cm(2.5)
+
+    title = doc.add_heading("施工安全隐患整改通知单（AI 辅助生成）", level=0)
+    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    p = doc.add_paragraph()
+    r = p.add_run(f"通知单编号：TZ-{now[:10].replace('-', '')}-{now[11:13]}{now[14:16]}{now[17:19]}\n"
+                  f"下发时间：{now}\n生成方式：本系统基于规范知识库自动生成，供现场检查参考。")
+    r.font.size = Pt(9)
+    r.font.color.rgb = RGBColor(0x66, 0x66, 0x66)
+
+    doc.add_heading("一、整改基本信息", level=1)
+    t1 = doc.add_table(rows=5, cols=2)
+    t1.style = "Table Grid"
+    rows = [
+        ("项目名称", "（待填写）"),
+        ("施工单位", "（待填写）"),
+        ("整改责任人", records[0].get("owner", "未指定")),
+        ("整改期限", records[0].get("deadline", "未指定")),
+        ("下发隐患条数", f"{len(records)} 条"),
+    ]
+    for i, (k, v) in enumerate(rows):
+        t1.cell(i, 0).text = k
+        t1.cell(i, 1).text = v
+
+    doc.add_heading("二、需整改隐患清单", level=1)
+    t2 = doc.add_table(rows=1 + len(records), cols=4)
+    t2.style = "Table Grid"
+    for j, htext in enumerate(["序号", "隐患描述", "风险等级", "整改要求"]):
+        t2.rows[0].cells[j].text = htext
+    for i, rec in enumerate(records, 1):
+        cells = t2.rows[i].cells
+        cells[0].text = str(i)
+        cells[1].text = rec["desc"]
+        cells[2].text = rec["level"]
+        sug = rec["suggestions"]
+        cells[3].text = "；".join(sug) if sug else "按相关规范整改"
+
+    doc.add_heading("三、整改要求", level=1)
+    serious = [r for r in records if r["level"] == "重大隐患"]
+    if serious:
+        doc.add_paragraph(
+            "本次通知共 {n} 条隐患，其中重大隐患 {s} 条。重大隐患必须立即停止相关作业，"
+            "制定专项整改方案并组织整改，整改完成经验收合格后方可恢复施工；其余隐患应在整改期限内完成整改。".format(
+                n=len(records), s=len(serious)))
+    else:
+        doc.add_paragraph(f"本次通知共 {len(records)} 条隐患，均应在整改期限内完成整改，整改完成后报请复查验收。")
+
+    doc.add_heading("四、签字确认", level=1)
+    t3 = doc.add_table(rows=4, cols=3)
+    t3.style = "Table Grid"
+    for j, htext in enumerate(["角色", "签字", "日期"]):
+        t3.rows[0].cells[j].text = htext
+    for i, role in enumerate(["签发人", "整改责任人", "复查人"], 1):
+        t3.rows[i].cells[0].text = role
+
+    docx_path = os.path.join(os.getcwd(), "safety_notice.docx")
+    doc.save(docx_path)
+    return docx_path
+
+
+def generate_notice_handler(sel):
+    """对选中隐患（或全部待整改隐患）生成整改通知单 PDF"""
+    if not risk_records:
+        return None, "暂无可生成通知单的隐患记录，请先进行风险分析。"
+    if sel is not None:
+        idx = int(str(sel).split(" ")[0].lstrip("#"))
+        recs = [risk_records[idx - 1]]
+    else:
+        recs = [r for r in risk_records if r.get("status", "待整改") == "待整改"]
+        if not recs:
+            return None, "没有待整改的隐患记录。"
+    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        docx_path = render_notice_docx(recs, now)
+        pdf_path = docx_to_pdf(docx_path)
+        if os.path.exists(docx_path):
+            os.remove(docx_path)
+        return pdf_path, f"整改通知单（PDF）已生成：{os.path.basename(pdf_path)}"
+    except Exception as e:
+        print(f"通知单生成失败: {e}")
+        return None, f"通知单生成失败：{e}"
+
+
+# ---------- 统计仪表盘 ----------
+def dashboard_handler():
+    """基于风险台账生成统计图：风险等级分布 / 高频隐患关键词 Top10 / 隐患趋势"""
+    import pandas as pd
+    from collections import Counter
+    import jieba
+    import plotly.express as px
+    import plotly.graph_objects as go
+
+    empty_fig = go.Figure()
+    if not risk_records:
+        return empty_fig, empty_fig, empty_fig, "暂无隐患数据，请先进行风险分析或视频巡检。"
+    df = pd.DataFrame(risk_records)
+    lv = df["level"].value_counts().reset_index()
+    lv.columns = ["风险等级", "数量"]
+    lv_fig = px.pie(lv, names="风险等级", values="数量", title="风险等级分布",
+                    color_discrete_sequence=px.colors.qualitative.Set1)
+    cnt = Counter()
+    for d in df["desc"]:
+        for w in jieba.lcut(str(d)):
+            if len(w) >= 2:
+                cnt[w] += 1
+    words = pd.DataFrame(cnt.most_common(10), columns=["隐患关键词", "出现次数"])
+    word_fig = px.bar(words, x="隐患关键词", y="出现次数", title="高频隐患关键词 Top10",
+                      color_discrete_sequence=["#1d4ed8"])
+    tr = df.copy()
+    tr["日期"] = tr["time"].str[:10]
+    trd = tr.groupby("日期").size().cumsum().reset_index()
+    trd.columns = ["日期", "累计隐患数"]
+    trend_fig = px.line(trd, x="日期", y="累计隐患数", title="隐患累计趋势",
+                        markers=True, color_discrete_sequence=["#1d4ed8"])
+    return lv_fig, word_fig, trend_fig, (
+        f"统计已更新：共 {len(risk_records)} 条隐患记录"
+        f"（重大 {int((df['level'] == '重大隐患').sum())} / 一般 {int((df['level'] == '一般隐患').sum())}）。")
+
+
+# ---------- 视频抽帧隐患识别 ----------
+def extract_video_frames(video_path, max_frames=6):
+    """从视频均匀抽取 max_frames 帧，返回 [(帧numpy, 时间点秒)]"""
+    import cv2
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        return []
+    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    if fps <= 0 or fps != fps:
+        fps = 25.0
+    step = max(1, total // max_frames) if total > 0 else 1
+    frames = []
+    idx = 0
+    while idx < total and len(frames) < max_frames:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+        ok, frame = cap.read()
+        if ok:
+            frames.append((frame, idx / fps))
+        idx += step
+    cap.release()
+    return frames
+
+
+def video_analysis_handler(video_path, top_k, dist_threshold, mode_value, use_rerank):
+    """上传现场视频 → 抽帧 → 逐帧 AI 隐患识别 → 视频巡检记录并入台账"""
+    global g_index, g_chunks_with_source, g_bm25
+    if g_index is None:
+        return "⚠️ 向量库未初始化，请先上传文档并重建向量库。"
+    if not video_path:
+        return "请先上传现场视频（mp4/avi/mov 等）。"
+    import cv2
+    import time as _time
+    frames = extract_video_frames(video_path)
+    if not frames:
+        return "无法读取视频，请确认文件格式与编码（建议 H.264 mp4）。"
+    os.makedirs("demo_images/frames", exist_ok=True)
+    use_hybrid = mode_map(mode_value)
+    lines = ["# 🎥 视频巡检记录", ""]
+    lines.append(f"> 视频：{os.path.basename(video_path)}　抽帧 {len(frames)} 帧　逐帧 AI 隐患识别", "")
+    for i, (frame, t) in enumerate(frames, 1):
+        tmp = f"demo_images/frames/vf_{int(_time.time())}_{i}.jpg"
+        cv2.imwrite(tmp, frame)
+        try:
+            result = analyze_image_risk(
+                tmp, g_index, g_chunks_with_source, g_bm25,
+                top_k=top_k, dist_threshold=dist_threshold, use_hybrid=use_hybrid,
+                use_rerank=use_rerank,
+            )
+        except Exception as e:
+            print(f"帧{i}识别异常: {e}")
+            lines.append(f"### 第 {i} 帧（⏱ {t:.1f}s）识别失败：{e}")
+            continue
+        level = result.get("risk_level", "无法判断")
+        badge = RISK_LEVEL_BADGE.get(level, f"⚪ {level}")
+        lines.append(f"### 第 {i} 帧（⏱ {t:.1f}s）{badge}")
+        if result.get("_image_desc"):
+            lines.append(f"\n**识别结果**：{result['_image_desc']}")
+        if result.get("summary"):
+            lines.append(f"\n**风险分析**：{result['summary']}")
+        ev = result.get("evidence", [])
+        if ev:
+            lines.append("\n**依据条款**：")
+            for e in ev:
+                lines.append(f"- {highlight_keywords(e, str(result.get('_image_desc', '')))}")
+        sg = result.get("suggestions", [])
+        if sg:
+            lines.append("\n**整改建议**：")
+            for j, s in enumerate(sg, 1):
+                lines.append(f"{j}. {s}")
+        lines.append(f"\n![第{i}帧画面]({tmp})")
+        desc = f"[视频巡检·{t:.1f}s] {result.get('_image_desc', '') or f'第{i}帧画面'}"
+        risk_records.append({
+            "time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "desc": desc,
+            "level": level,
+            "summary": result.get("summary", ""),
+            "evidence": ev,
+            "suggestions": sg,
+            "sources": sorted(set(result.get("_sources", []))),
+            "image_path": tmp,
+            "status": "待整改",
+            "owner": "未指定",
+            "deadline": "未指定",
+        })
+        lines.append("")
+    lines.append("\n> ✅ 全部帧识别完毕，隐患已自动加入台账，可一键生成带图安全检查报告或整改通知单。")
+    return "\n".join(lines)
+
+
 CUSTOM_CSS = """
 #app-header {
   text-align: center;
@@ -577,6 +839,33 @@ with gr.Blocks(title="智安查 · 建造安全智能问答") as demo:
                     value=True,
                 )
 
+            with gr.Accordion("📊 隐患台账与统计", open=False):
+                ledger_table = gr.Dataframe(
+                    headers=LEDGER_HEADERS,
+                    value=ledger_df(),
+                    interactive=False,
+                    wrap=True,
+                    label="隐患台账（本会话）",
+                )
+                with gr.Row():
+                    record_sel = gr.Dropdown(choices=record_choices(), label="选择记录")
+                    status_dropdown = gr.Dropdown(
+                        choices=["待整改", "复查中", "已整改"],
+                        value="复查中",
+                        label="更新为",
+                    )
+                with gr.Row():
+                    update_status_btn = gr.Button("更新状态", variant="secondary")
+                    refresh_ledger_btn = gr.Button("刷新台账", variant="secondary")
+                with gr.Row():
+                    notice_btn = gr.Button("生成整改通知单", variant="secondary")
+                    notice_file = gr.File(label="下载通知单（PDF）")
+                dashboard_btn = gr.Button("刷新统计", variant="secondary")
+                level_pie = gr.Plot(label="风险等级分布")
+                word_bar = gr.Plot(label="高频隐患关键词 Top10")
+                trend_line = gr.Plot(label="隐患累计趋势")
+                dashboard_info = gr.Textbox(label="统计状态", interactive=False)
+
         # 右侧：聊天 + 风险分析
         with gr.Column(scale=2):
             with gr.Group(elem_classes="chat-card"):
@@ -598,11 +887,18 @@ with gr.Blocks(title="智安查 · 建造安全智能问答") as demo:
                     lines=2,
                 )
                 risk_image = gr.Image(type="filepath", label="现场照片（可选，自动识别隐患）")
+                with gr.Row():
+                    risk_owner = gr.Textbox(label="整改责任人（可选）", placeholder="如：张工")
+                    risk_deadline = gr.Textbox(label="整改期限（可选）", placeholder="如：2026-09-20")
                 risk_btn = gr.Button("开始风险分析", variant="primary")
                 risk_output = gr.Markdown()
                 with gr.Row():
                     report_btn = gr.Button("生成安全检查报告", variant="secondary")
                     report_file = gr.File(label="下载报告（PDF）")
+
+            with gr.Accordion("🎥 视频巡检（抽帧隐患识别）", open=False):
+                video_input = gr.Video(label="现场视频（mp4/avi/mov）")
+                video_btn = gr.Button("开始视频巡检", variant="primary")
 
     # 事件绑定
     def mode_map(x):
@@ -624,10 +920,19 @@ with gr.Blocks(title="智安查 · 建造安全智能问答") as demo:
     demo.load(list_docs_handler, outputs=doc_list)
     risk_btn.click(
         risk_analysis_handler,
-        inputs=[risk_input, risk_image, top_k_slider, dist_slider, mode_dropdown, rerank_checkbox],
-        outputs=[risk_output],
+        inputs=[risk_input, risk_image, risk_owner, risk_deadline, top_k_slider, dist_slider, mode_dropdown, rerank_checkbox],
+        outputs=[risk_output, ledger_table],
     )
     report_btn.click(generate_report_handler, outputs=[report_file, risk_output])
+    video_btn.click(
+        video_analysis_handler,
+        inputs=[video_input, top_k_slider, dist_slider, mode_dropdown, rerank_checkbox],
+        outputs=[risk_output, ledger_table],
+    )
+    refresh_ledger_btn.click(refresh_ledger_handler, outputs=[ledger_table, record_sel])
+    update_status_btn.click(update_status_handler, inputs=[record_sel, status_dropdown], outputs=[ledger_table, dashboard_info])
+    notice_btn.click(generate_notice_handler, inputs=[record_sel], outputs=[notice_file, dashboard_info])
+    dashboard_btn.click(dashboard_handler, outputs=[level_pie, word_bar, trend_line, dashboard_info])
 
 
 g_index, g_chunks_with_source, init_msg, g_bm25 = build_vector_from_docs(chunk_size=350, overlap=60)
