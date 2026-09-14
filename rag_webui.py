@@ -1131,6 +1131,66 @@ table td, table th, .dataframe td, .dataframe th {
   font-variant-numeric: tabular-nums;
 }
 
+/* 隐患台账等 Dataframe 表格：强制浅色可读（防深色偏好下黑底白字） */
+.gr-dataframe,
+.gr-dataframe .table-wrap,
+.table-wrap,
+.gr-dataframe table,
+table.dataframe,
+.ag-theme-alpine {
+  background: #ffffff !important;
+  color: #0f172a !important;
+}
+.gr-dataframe th,
+.gr-dataframe thead,
+table.dataframe th,
+.table-wrap thead,
+.header-table,
+.header-table thead {
+  background: #f1f5f9 !important;
+  color: #0f172a !important;
+}
+.header-table th,
+.header-cell {
+  background: #f1f5f9 !important;
+  color: #0f172a !important;
+  border-color: #e2e8f0 !important;
+}
+.header-table th span,
+.header-table .header,
+.header-cell span {
+  color: #0f172a !important;
+}
+.gr-dataframe td,
+table.dataframe td,
+.table-wrap td {
+  background: #ffffff !important;
+  color: #0f172a !important;
+  border-color: #e2e8f0 !important;
+}
+.gr-dataframe .header,
+.gr-dataframe .cell,
+.gr-dataframe .controls {
+  background: #ffffff !important;
+  color: #0f172a !important;
+}
+
+/* 下拉列表选项：强制浅色 */
+.gr-dropdown .options,
+.gr-dropdown [role="listbox"],
+.gr-dropdown ul,
+.gr-dropdown li {
+  background: #ffffff !important;
+  color: #0f172a !important;
+}
+
+/* 图表容器：强制浅色底 */
+.gr-plot {
+  background: #ffffff !important;
+  border-radius: 8px;
+  padding: 0.5rem;
+}
+
 footer { display: none !important; }
 """
 
