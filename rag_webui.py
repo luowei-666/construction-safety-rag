@@ -7,6 +7,8 @@ import os
 import re
 import shutil
 import datetime
+import threading
+import time as _time
 import gradio as gr
 
 from rag_core import (
@@ -38,6 +40,56 @@ g_index = None
 g_chunks_with_source = None
 g_bm25 = None
 risk_records = []  # 本次会话的风险分析记录，用于生成安全检查报告
+
+# ---- 知识库定时更新（后台线程） ----
+AUTO_UPDATE_ENABLED = False
+AUTO_UPDATE_INTERVAL_HOURS = 6
+_docs_snapshot = {}
+_auto_lock = threading.Lock()
+
+
+def docs_snapshot():
+    """扫描 docs/ 生成 文件名 -> (大小, mtime) 快照，用于检测变化"""
+    snap = {}
+    if os.path.isdir(DOC_FOLDER):
+        for f in os.listdir(DOC_FOLDER):
+            p = os.path.join(DOC_FOLDER, f)
+            if os.path.isfile(p):
+                try:
+                    snap[f] = (os.path.getsize(p), os.path.getmtime(p))
+                except OSError:
+                    pass
+    return snap
+
+
+def auto_update_worker():
+    """后台线程：按间隔扫描，检测到知识库变化即重建索引"""
+    global g_index, g_chunks_with_source, g_bm25, _docs_snapshot
+    while True:
+        _time.sleep(AUTO_UPDATE_INTERVAL_HOURS * 3600)
+        if not AUTO_UPDATE_ENABLED:
+            continue
+        try:
+            snap = docs_snapshot()
+            if snap != _docs_snapshot:
+                with _auto_lock:
+                    g_index, g_chunks_with_source, msg, g_bm25 = build_vector_from_docs(
+                        chunk_size=350, overlap=60)
+                    _docs_snapshot = snap
+                print(f"[定时更新] 检测到知识库变化，已自动重建：{msg}")
+        except Exception as e:
+            print(f"[定时更新] 失败：{e}")
+
+
+def auto_update_handler(enable, hours):
+    """保存定时更新设置（开关 + 间隔小时数）"""
+    global AUTO_UPDATE_ENABLED, AUTO_UPDATE_INTERVAL_HOURS
+    AUTO_UPDATE_ENABLED = bool(enable)
+    AUTO_UPDATE_INTERVAL_HOURS = max(1, int(hours))
+    if AUTO_UPDATE_ENABLED:
+        return ("已开启：每 %d 小时检查一次 docs/ 文件夹，检测到文档新增或改动将自动重建索引。"
+                % AUTO_UPDATE_INTERVAL_HOURS)
+    return "已关闭定时更新。"
 
 
 MODEL_MAP = {
@@ -975,6 +1027,16 @@ with gr.Blocks(title="智安查 · 建造安全智能问答") as demo:
                     clear_btn_2 = gr.Button("清空缓存", variant="secondary")
                 rebuild_info = gr.Textbox(label="索引状态", interactive=False)
 
+            with gr.Accordion("⏰ 知识库定时更新", open=False):
+                auto_update_check = gr.Checkbox(label="开启定时更新", value=False)
+                auto_update_hours = gr.Slider(
+                    minimum=1, maximum=24, value=6, step=1, label="检查间隔（小时）",
+                    info="到点自动扫描 docs/，检测到新文档自动重建索引",
+                )
+                with gr.Row():
+                    auto_update_btn = gr.Button("保存设置", variant="secondary")
+                    auto_update_info = gr.Textbox(label="定时更新状态", interactive=False)
+
             with gr.Accordion("⚙ 高级参数", open=False):
                 chunk_size_slider = gr.Slider(minimum=100, maximum=1000, value=350, step=50, label="Chunk 大小")
                 overlap_slider = gr.Slider(minimum=0, maximum=200, value=60, step=10, label="重叠 Overlap")
@@ -1079,6 +1141,7 @@ with gr.Blocks(title="智安查 · 建造安全智能问答") as demo:
 
     upload_files.upload(upload_file_handler, inputs=[upload_files], outputs=[upload_info])
     rebuild_btn.click(rebuild_btn_click, inputs=[chunk_size_slider, overlap_slider], outputs=[rebuild_info])
+    auto_update_btn.click(auto_update_handler, inputs=[auto_update_check, auto_update_hours], outputs=[auto_update_info])
     clear_btn_2.click(clear_vector_btn_click, outputs=[rebuild_info])
 
     msg_input.submit(
@@ -1113,6 +1176,10 @@ with gr.Blocks(title="智安查 · 建造安全智能问答") as demo:
 
 g_index, g_chunks_with_source, init_msg, g_bm25 = build_vector_from_docs(chunk_size=350, overlap=60)
 print(init_msg)
+
+_docs_snapshot = docs_snapshot()
+threading.Thread(target=auto_update_worker, daemon=True, name="auto-update").start()
+print(f"[定时更新] 后台线程已启动，当前知识库文件数：{len(_docs_snapshot)}")
 
 print("网页服务启动，浏览器访问: http://127.0.0.1:7860")
 demo.launch(
