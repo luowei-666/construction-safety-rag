@@ -21,6 +21,8 @@ from rag_core import (
     dashscope_chat_stream,
     analyze_risk,
     analyze_image_risk,
+    dashscope_asr,
+    dashscope_tts,
     DASHSCOPE_API_KEY,
 )
 
@@ -36,6 +38,17 @@ g_index = None
 g_chunks_with_source = None
 g_bm25 = None
 risk_records = []  # 本次会话的风险分析记录，用于生成安全检查报告
+
+
+MODEL_MAP = {
+    "qwen-turbo（默认，快）": "qwen-turbo",
+    "qwen-plus（更准）": "qwen-plus",
+    "qwen-max（最强）": "qwen-max",
+}
+
+
+def resolve_model(x):
+    return MODEL_MAP.get(x, x)
 
 
 def extract_clause(text):
@@ -59,7 +72,8 @@ def highlight_keywords(text, query, max_len=250):
     return snippet
 
 
-def chat_handler(message, chat_history, top_k, dist_threshold, max_rounds, use_hybrid, use_rerank):
+def chat_handler(message, chat_history, top_k, dist_threshold, max_rounds, use_hybrid, use_rerank, model_name):
+    model_name = resolve_model(model_name)
     global g_index, g_chunks_with_source, g_bm25
     try:
         if g_index is None:
@@ -111,7 +125,7 @@ def chat_handler(message, chat_history, top_k, dist_threshold, max_rounds, use_h
         yield display_history, ""
 
         accumulate = ""
-        for chunk in dashscope_chat_stream(messages):
+        for chunk in dashscope_chat_stream(messages, model=model_name):
             accumulate += chunk
             display_history[-1]["content"] = accumulate
             yield display_history, ""
@@ -222,7 +236,8 @@ def delete_doc_handler(fname):
     return list_docs_handler(), f"文件不存在：{fname}"
 
 
-def risk_analysis_handler(message, image_path, owner, deadline, top_k, dist_threshold, mode_value, use_rerank):
+def risk_analysis_handler(message, image_path, owner, deadline, top_k, dist_threshold, mode_value, use_rerank, model_name):
+    model_name = resolve_model(model_name)
     global g_index, g_chunks_with_source, g_bm25
     if g_index is None:
         return "⚠️ 向量库未初始化，请先上传文档并重建向量库。"
@@ -235,6 +250,7 @@ def risk_analysis_handler(message, image_path, owner, deadline, top_k, dist_thre
                 image_path, g_index, g_chunks_with_source, g_bm25,
                 top_k=top_k, dist_threshold=dist_threshold, use_hybrid=use_hybrid,
                 use_rerank=use_rerank,
+                model=model_name,
             )
             image_desc = result.get("_image_desc", "")
             message = f"{message.strip()}\n【照片识别】{image_desc}".strip()
@@ -243,6 +259,7 @@ def risk_analysis_handler(message, image_path, owner, deadline, top_k, dist_thre
                 message, g_index, g_chunks_with_source, g_bm25,
                 top_k=top_k, dist_threshold=dist_threshold, use_hybrid=use_hybrid,
                 use_rerank=use_rerank,
+                model=model_name,
             )
     except Exception as e:
         print(f"风险分析异常: {e}")
@@ -257,10 +274,12 @@ def risk_analysis_handler(message, image_path, owner, deadline, top_k, dist_thre
     if summary:
         lines.append(f"\n**风险分析**：{summary}")
     evidence = result.get("evidence", [])
+    verified_map = {v.get("text"): v.get("verified", False) for v in result.get("_verified", [])}
     if evidence:
         lines.append("\n**依据条款**：")
         for e in evidence:
-            lines.append(f"- {highlight_keywords(e, message)}")
+            mark = "✅ 已核验" if verified_map.get(e) else "⚠️ 待复核"
+            lines.append(f"- {mark} {highlight_keywords(e, message)}")
     suggestions = result.get("suggestions", [])
     if suggestions:
         lines.append("\n**整改建议**：")
@@ -468,6 +487,135 @@ def render_risk_report_docx(records, now):
     docx_path = os.path.join(os.getcwd(), "safety_check_report.docx")
     doc.save(docx_path)
     return docx_path
+
+
+
+# ---------- 报告模板扩展（监理通知单 / 项目周报） ----------
+def render_supervision_docx(records, now):
+    """监理工程师通知单 Word 文档"""
+    from docx import Document
+    from docx.shared import Pt, Cm, RGBColor
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    doc = Document()
+    for sec in doc.sections:
+        sec.top_margin = Cm(2.2); sec.bottom_margin = Cm(2.2); sec.left_margin = Cm(2.5); sec.right_margin = Cm(2.5)
+    title = doc.add_heading("监理工程师通知单（AI 辅助生成）", level=0)
+    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    p = doc.add_paragraph()
+    r = p.add_run("编号：JL-%s-%s%s\n签发时间：%s\n致（施工单位）：%s" % (
+        now[:10].replace("-", ""), now[11:13], now[14:16], now, records[0].get("owner", "（待填写）")))
+    r.font.size = Pt(9); r.font.color.rgb = RGBColor(0x66, 0x66, 0x66)
+    doc.add_heading("一、通知事由", level=1)
+    doc.add_paragraph("经现场检查，发现以下安全隐患，请贵单位立即组织整改：")
+    doc.add_heading("二、隐患明细", level=1)
+    t = doc.add_table(rows=1 + len(records), cols=4); t.style = "Table Grid"
+    for j, h in enumerate(["序号", "隐患描述", "风险等级", "整改要求"]):
+        t.rows[0].cells[j].text = h
+    for i, rec in enumerate(records, 1):
+        c = t.rows[i].cells
+        c[0].text = str(i); c[1].text = rec["desc"]; c[2].text = rec["level"]
+        c[3].text = "；".join(rec["suggestions"]) if rec["suggestions"] else "按相关规范整改"
+    doc.add_heading("三、整改要求与复查", level=1)
+    doc.add_paragraph("请于 %s 前完成整改，整改完成后报监理复查验收；逾期未整改或整改不合格的，将按合同约定及有关规定处理。" % records[0].get("deadline", "规定期限"))
+    doc.add_heading("四、签字", level=1)
+    t3 = doc.add_table(rows=4, cols=3); t3.style = "Table Grid"
+    for j, h in enumerate(["角色", "签字", "日期"]):
+        t3.rows[0].cells[j].text = h
+    for i, role in enumerate(["总监理工程师/监理工程师", "施工单位负责人", "复查人"], 1):
+        t3.rows[i].cells[0].text = role
+    path = os.path.join(os.getcwd(), "supervision_notice.docx")
+    doc.save(path); return path
+
+
+def render_weekly_docx(records, now):
+    """项目安全周报 Word 文档"""
+    from docx import Document
+    from docx.shared import Pt, Cm, RGBColor
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    doc = Document()
+    for sec in doc.sections:
+        sec.top_margin = Cm(2.2); sec.bottom_margin = Cm(2.2); sec.left_margin = Cm(2.5); sec.right_margin = Cm(2.5)
+    title = doc.add_heading("项目施工安全周报（AI 辅助生成）", level=0)
+    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    p = doc.add_paragraph()
+    r = p.add_run("统计截止：%s（第 %s 周）\n生成方式：本系统自动汇总本周隐患分析记录" % (now[:10], now[5:7]))
+    r.font.size = Pt(9); r.font.color.rgb = RGBColor(0x66, 0x66, 0x66)
+    doc.add_heading("一、本周隐患总览", level=1)
+    serious = sum(1 for x in records if x["level"] == "重大隐患")
+    normal = sum(1 for x in records if x["level"] == "一般隐患")
+    closed = sum(1 for x in records if x.get("status") == "已整改")
+    t1 = doc.add_table(rows=5, cols=2); t1.style = "Table Grid"
+    for i, (k, v) in enumerate([("隐患总数", "%d 条" % len(records)), ("重大隐患", "%d 条" % serious),
+                                ("一般隐患", "%d 条" % normal), ("已闭环", "%d 条" % closed),
+                                ("待整改", "%d 条" % (len(records) - closed))]):
+        t1.cell(i, 0).text = k; t1.cell(i, 1).text = v
+    doc.add_heading("二、隐患明细", level=1)
+    t2 = doc.add_table(rows=1 + len(records), cols=5); t2.style = "Table Grid"
+    for j, h in enumerate(["序号", "时间", "隐患描述", "风险等级", "状态"]):
+        t2.rows[0].cells[j].text = h
+    for i, rec in enumerate(records, 1):
+        c = t2.rows[i].cells
+        c[0].text = str(i); c[1].text = rec["time"][5:16]; c[2].text = rec["desc"]
+        c[3].text = rec["level"]; c[4].text = rec.get("status", "待整改")
+    doc.add_heading("三、本周小结", level=1)
+    if serious:
+        doc.add_paragraph("本周共发现重大隐患 %d 条，须立即停工整改并组织专项验收，严防群死群伤事故发生。" % serious)
+    else:
+        doc.add_paragraph("本周隐患均为一般隐患，已督促限期整改并复查闭环。")
+    doc.add_heading("四、签发", level=1)
+    t3 = doc.add_table(rows=4, cols=3); t3.style = "Table Grid"
+    for j, h in enumerate(["角色", "签字", "日期"]):
+        t3.rows[0].cells[j].text = h
+    for i, role in enumerate(["安全员", "项目负责人", "监理"], 1):
+        t3.rows[i].cells[0].text = role
+    path = os.path.join(os.getcwd(), "weekly_report.docx")
+    doc.save(path); return path
+
+
+def generate_template_handler(template_name):
+    """按模板生成 PDF：整改通知单 / 监理工程师通知单 / 项目安全周报"""
+    if not risk_records:
+        return None, "暂无隐患记录，请先进行风险分析。"
+    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        if template_name == "监理工程师通知单":
+            docx_path = render_supervision_docx(risk_records, now)
+        elif template_name == "项目安全周报":
+            docx_path = render_weekly_docx(risk_records, now)
+        else:  # 整改通知单
+            recs = [r for r in risk_records if r.get("status", "待整改") == "待整改"] or risk_records
+            docx_path = render_notice_docx(recs, now)
+        pdf_path = docx_to_pdf(docx_path)
+        if os.path.exists(docx_path):
+            os.remove(docx_path)
+        return pdf_path, "%s（PDF）已生成：%s" % (template_name, os.path.basename(pdf_path))
+    except Exception as e:
+        print("模板报告生成失败: %s" % e)
+        return None, "模板报告生成失败：%s" % e
+
+
+# ---------- 语音问答（ASR 输入 / TTS 播报） ----------
+def asr_question_handler(audio_path):
+    """语音转文字：识别结果同时填入识别框与风险分析输入框"""
+    if not audio_path:
+        return "", ""
+    try:
+        text = dashscope_asr(audio_path)
+        return text, text
+    except Exception as e:
+        print("语音识别失败: %s" % e)
+        return "语音识别失败：%s" % e, "语音识别失败：%s" % e
+
+
+def tts_handler(text):
+    """朗读风险分析结果（返回音频文件）"""
+    if not text or not text.strip():
+        return None
+    try:
+        return dashscope_tts(text[:500])
+    except Exception as e:
+        print("语音合成失败: %s" % e)
+        return None
 
 
 def docx_to_pdf(docx_path):
@@ -679,7 +827,8 @@ def extract_video_frames(video_path, max_frames=6):
     return frames
 
 
-def video_analysis_handler(video_path, top_k, dist_threshold, mode_value, use_rerank):
+def video_analysis_handler(video_path, top_k, dist_threshold, mode_value, use_rerank, model_name):
+    model_name = resolve_model(model_name)
     """上传现场视频 → 抽帧 → 逐帧 AI 隐患识别 → 视频巡检记录并入台账"""
     global g_index, g_chunks_with_source, g_bm25
     if g_index is None:
@@ -703,6 +852,7 @@ def video_analysis_handler(video_path, top_k, dist_threshold, mode_value, use_re
                 tmp, g_index, g_chunks_with_source, g_bm25,
                 top_k=top_k, dist_threshold=dist_threshold, use_hybrid=use_hybrid,
                 use_rerank=use_rerank,
+                model=model_name,
             )
         except Exception as e:
             print(f"帧{i}识别异常: {e}")
@@ -716,10 +866,12 @@ def video_analysis_handler(video_path, top_k, dist_threshold, mode_value, use_re
         if result.get("summary"):
             lines.append(f"\n**风险分析**：{result['summary']}")
         ev = result.get("evidence", [])
+        ev_map = {v.get("text"): v.get("verified", False) for v in result.get("_verified", [])}
         if ev:
             lines.append("\n**依据条款**：")
             for e in ev:
-                lines.append(f"- {highlight_keywords(e, str(result.get('_image_desc', '')))}")
+                mark = "✅ 已核验" if ev_map.get(e) else "⚠️ 待复核"
+                lines.append(f"- {mark} {highlight_keywords(e, str(result.get('_image_desc', '')))}")
         sg = result.get("suggestions", [])
         if sg:
             lines.append("\n**整改建议**：")
@@ -838,6 +990,11 @@ with gr.Blocks(title="智安查 · 建造安全智能问答") as demo:
                     label="启用 Rerank 重排（更精准，稍慢）",
                     value=True,
                 )
+                model_dropdown = gr.Dropdown(
+                    choices=["qwen-turbo（默认，快）", "qwen-plus（更准）", "qwen-max（最强）"],
+                    value="qwen-turbo（默认，快）",
+                    label="问答模型",
+                )
 
             with gr.Accordion("📊 隐患台账与统计", open=False):
                 ledger_table = gr.Dataframe(
@@ -895,10 +1052,26 @@ with gr.Blocks(title="智安查 · 建造安全智能问答") as demo:
                 with gr.Row():
                     report_btn = gr.Button("生成安全检查报告", variant="secondary")
                     report_file = gr.File(label="下载报告（PDF）")
+                with gr.Row():
+                    report_template = gr.Dropdown(
+                        choices=["整改通知单", "监理工程师通知单", "项目安全周报"],
+                        value="整改通知单",
+                        label="模板报告",
+                    )
+                    template_btn = gr.Button("生成模板报告", variant="secondary")
+                    template_file = gr.File(label="下载模板报告（PDF）")
 
             with gr.Accordion("🎥 视频巡检（抽帧隐患识别）", open=False):
                 video_input = gr.Video(label="现场视频（mp4/avi/mov）")
                 video_btn = gr.Button("开始视频巡检", variant="primary")
+
+            with gr.Accordion("🎤 语音问答", open=False):
+                audio_input = gr.Audio(sources=["microphone"], type="filepath", label="点击录音，说出施工现场情况")
+                asr_btn = gr.Button("语音转文字", variant="primary")
+                asr_output = gr.Textbox(label="识别结果（可编辑后用于风险分析）", interactive=True, lines=2)
+                with gr.Row():
+                    tts_btn = gr.Button("朗读风险分析结果", variant="secondary")
+                    tts_audio = gr.Audio(label="语音播报", type="filepath")
 
     # 事件绑定
     def mode_map(x):
@@ -910,7 +1083,7 @@ with gr.Blocks(title="智安查 · 建造安全智能问答") as demo:
 
     msg_input.submit(
         fn=chat_handler,
-        inputs=[msg_input, chatbot, top_k_slider, dist_slider, max_rounds_slider, mode_dropdown, rerank_checkbox],
+        inputs=[msg_input, chatbot, top_k_slider, dist_slider, max_rounds_slider, mode_dropdown, rerank_checkbox, model_dropdown],
         outputs=[chatbot, msg_input]
     )
     clear_btn.click(lambda: [], None, chatbot)
@@ -920,19 +1093,22 @@ with gr.Blocks(title="智安查 · 建造安全智能问答") as demo:
     demo.load(list_docs_handler, outputs=doc_list)
     risk_btn.click(
         risk_analysis_handler,
-        inputs=[risk_input, risk_image, risk_owner, risk_deadline, top_k_slider, dist_slider, mode_dropdown, rerank_checkbox],
+        inputs=[risk_input, risk_image, risk_owner, risk_deadline, top_k_slider, dist_slider, mode_dropdown, rerank_checkbox, model_dropdown],
         outputs=[risk_output, ledger_table],
     )
     report_btn.click(generate_report_handler, outputs=[report_file, risk_output])
     video_btn.click(
         video_analysis_handler,
-        inputs=[video_input, top_k_slider, dist_slider, mode_dropdown, rerank_checkbox],
+        inputs=[video_input, top_k_slider, dist_slider, mode_dropdown, rerank_checkbox, model_dropdown],
         outputs=[risk_output, ledger_table],
     )
     refresh_ledger_btn.click(refresh_ledger_handler, outputs=[ledger_table, record_sel])
     update_status_btn.click(update_status_handler, inputs=[record_sel, status_dropdown], outputs=[ledger_table, dashboard_info])
     notice_btn.click(generate_notice_handler, inputs=[record_sel], outputs=[notice_file, dashboard_info])
     dashboard_btn.click(dashboard_handler, outputs=[level_pie, word_bar, trend_line, dashboard_info])
+    template_btn.click(generate_template_handler, inputs=[report_template], outputs=[template_file, dashboard_info])
+    asr_btn.click(asr_question_handler, inputs=[audio_input], outputs=[asr_output, risk_input])
+    tts_btn.click(tts_handler, inputs=[risk_output], outputs=[tts_audio])
 
 
 g_index, g_chunks_with_source, init_msg, g_bm25 = build_vector_from_docs(chunk_size=350, overlap=60)

@@ -55,7 +55,7 @@ def dashscope_embedding(text: str):
     return data["output"]["embeddings"][0]["embedding"]
 
 
-def dashscope_chat(messages):
+def dashscope_chat(messages, model="qwen-turbo"):
     """非流式调用，返回完整回答"""
     url = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation"
     headers = {
@@ -63,7 +63,7 @@ def dashscope_chat(messages):
         "Content-Type": "application/json"
     }
     payload = {
-        "model": "qwen-turbo",
+        "model": model,
         "input": {"messages": messages},
         "parameters": {"result_format": "message"}
     }
@@ -92,7 +92,101 @@ def dashscope_rerank(query, documents, top_n=5, model="gte-rerank-v2"):
     return [r["index"] for r in results], results
 
 
-def dashscope_chat_stream(messages):
+# ---------- 引用真实性校验（防幻觉引用） ----------
+def _ngram_overlap(a, b, n=5):
+    """a 中 n-gram 出现在 b 中的比例，近似两段文本的重叠度（0~1）"""
+    if not a or not b:
+        return 0.0
+    if len(a) < n or len(b) < n:
+        return 1.0 if a in b else 0.0
+    grams = set(a[i:i + n] for i in range(len(a) - n + 1))
+    if not grams:
+        return 0.0
+    hit = sum(1 for g in grams if g in b)
+    return hit / len(grams)
+
+
+def verify_evidence(evidence_list, hits, overlap_threshold=0.5):
+    """逐条校验 LLM 生成的依据条款是否真实存在于检索片段中（防幻觉引用）。
+
+    返回列表，每项: {text, verified, ratio, matched_source}
+    """
+    norm = lambda s: re.sub(r"\s+", "", s)
+    corpus = [(norm(h.get("text", "")), h.get("source", "")) for h in hits]
+    results = []
+    for ev in evidence_list:
+        nev = norm(ev)
+        best_ratio, best_src = 0.0, ""
+        for ctext, csrc in corpus:
+            ratio = _ngram_overlap(nev, ctext)
+            if ratio > best_ratio:
+                best_ratio = ratio
+                best_src = csrc
+        results.append({
+            "text": ev,
+            "verified": best_ratio >= overlap_threshold,
+            "ratio": round(best_ratio, 2),
+            "matched_source": best_src,
+        })
+    return results
+
+
+# ---------- 语音识别（ASR）与语音合成（TTS） ----------
+def dashscope_asr(audio_path, model="qwen3-asr-flash"):
+    """语音识别：qwen3-asr-flash（OpenAI 兼容接口，音频转文字）"""
+    url = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
+    import base64
+    with open(audio_path, "rb") as f:
+        b64 = base64.b64encode(f.read()).decode()
+    data_uri = f"data:audio/wav;base64,{b64}"
+    payload = {
+        "model": model,
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "input_audio", "input_audio": {"data": data_uri}},
+            ],
+        }],
+    }
+    headers = {
+        "Authorization": f"Bearer {DASHSCOPE_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    resp = requests.post(url, headers=headers, json=payload, timeout=60)
+    resp.raise_for_status()
+    return resp.json()["choices"][0]["message"]["content"].strip()
+
+
+def dashscope_tts(text, model="sambert-zhichu-v1"):
+    """语音合成：sambert（dashscope SDK 同步接口，返回 wav 文件路径，失败返回 None）"""
+    try:
+        from dashscope.audio.tts import SpeechSynthesizer
+    except Exception:
+        print("TTS 需要 dashscope SDK：pip install dashscope")
+        return None
+    try:
+        result = SpeechSynthesizer.call(
+            model=model,
+            text=text[:500],
+            format="wav",
+            sample_rate=24000,
+        )
+        data = result.get_audio_data()
+        if not data:
+            return None
+        out = "tts_output.wav"
+        with open(out, "wb") as f:
+            f.write(data)
+        return out
+    except Exception as e:
+        print(f"TTS 合成失败: {e}")
+        return None
+    except Exception as e:
+        print(f"TTS 失败: {e}")
+        return None
+
+
+def dashscope_chat_stream(messages, model="qwen-turbo"):
     """流式调用，逐字返回"""
     url = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation"
     headers = {
@@ -100,7 +194,7 @@ def dashscope_chat_stream(messages):
         "Content-Type": "application/json"
     }
     payload = {
-        "model": "qwen-turbo",
+        "model": model,
         "input": {"messages": messages},
         "parameters": {"result_format": "message", "incremental_output": True}
     }
@@ -426,7 +520,7 @@ def dashscope_vl(messages, model="qwen-vl-plus", timeout=90):
     return resp.json()["choices"][0]["message"]["content"].strip()
 
 
-def describe_image_hazard(image_path):
+def describe_image_hazard(image_path, model="qwen-vl-plus"):
     """识别现场照片中的安全隐患，返回文字描述（供检索与风险分析使用）"""
     data_uri = _image_to_data_uri(image_path)
     prompt = (
@@ -439,21 +533,21 @@ def describe_image_hazard(image_path):
         {"type": "image_url", "image_url": {"url": data_uri}},
         {"type": "text", "text": prompt},
     ]}]
-    return dashscope_vl(messages)
+    return dashscope_vl(messages, model=model)
 
 
 def analyze_image_risk(image_path, index, chunks_with_source, bm25, top_k=5,
                        dist_threshold=0.85, use_hybrid=True, weight_bm25=0.25,
-                       use_rerank=False):
+                       use_rerank=False, model="qwen-turbo", vl_model="qwen-vl-plus"):
     """现场照片隐患分析：先视觉识别隐患描述，再走规范检索 + 结构化风险分析。
 
     返回 analyze_risk 的结果，并附带 _image_desc（视觉识别出的隐患描述）。
     """
-    desc = describe_image_hazard(image_path)
+    desc = describe_image_hazard(image_path, model=vl_model)
     result = analyze_risk(desc, index, chunks_with_source, bm25,
                           top_k=top_k, dist_threshold=dist_threshold,
                           use_hybrid=use_hybrid, weight_bm25=weight_bm25,
-                          use_rerank=use_rerank)
+                          use_rerank=use_rerank, model=model)
     result["_image_desc"] = desc
     return result
 
@@ -461,11 +555,12 @@ def analyze_image_risk(image_path, index, chunks_with_source, bm25, top_k=5,
 # ---------- 隐患风险结构化分析 ----------
 def analyze_risk(question, index, chunks_with_source, bm25, top_k=5,
                  dist_threshold=0.85, use_hybrid=True, weight_bm25=0.25,
-                 use_rerank=False):
+                 use_rerank=False, model="qwen-turbo"):
     """对施工现场隐患描述做结构化风险分析（决策辅助层）。
 
     流程：混合检索规范条款（可选 Rerank 重排）→ LLM 按固定 JSON 结构输出风险等级/依据/整改建议。
-    返回 dict: {risk_level, summary, evidence: [], suggestions: [], _sources: []}
+    返回 dict: {risk_level, summary, evidence: [], suggestions: [], _sources: [],
+                _verified: [{text, verified, ratio, matched_source}]}
     """
     hits = hybrid_search(index, chunks_with_source, bm25, question,
                          top_k=top_k, dist_threshold=dist_threshold,
@@ -499,7 +594,7 @@ def analyze_risk(question, index, chunks_with_source, bm25, top_k=5,
 }}
 注意：只依据检索到的条文判断；若条文与描述不相关，risk_level 填"无法判断"。"""
     msgs = [{"role": "user", "content": prompt}]
-    raw = dashscope_chat(msgs)
+    raw = dashscope_chat(msgs, model=model)
 
     data = None
     try:
@@ -531,6 +626,13 @@ def analyze_risk(question, index, chunks_with_source, bm25, top_k=5,
             unique_ev.append(str(e))
     data["evidence"] = unique_ev
     data["_sources"] = [h["source"] for h in hits]
+    # 引用真实性校验：每条依据条款与检索片段做 n-gram 重叠度比对
+    try:
+        data["_verified"] = verify_evidence(data["evidence"], hits)
+    except Exception as e:
+        print(f"引用校验异常: {e}")
+        data["_verified"] = [{"text": e, "verified": False, "ratio": 0.0,
+                              "matched_source": ""} for e in data["evidence"]]
     return data
 
 
