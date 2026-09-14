@@ -950,50 +950,187 @@ def video_analysis_handler(video_path, top_k, dist_threshold, mode_value, use_re
 
 
 CUSTOM_CSS = """
-#app-header {
-  text-align: center;
-  padding: 1.4rem 1rem;
-  background: linear-gradient(135deg, #1d4ed8 0%, #1e40af 100%);
-  border-radius: 12px;
-  margin-bottom: 0.8rem;
-  box-shadow: 0 2px 10px rgba(30, 64, 175, 0.25);
+/* ===== 智安查 UI（Operate · Restrained）===== */
+:root {
+  --brand: #1d4ed8;
+  --brand-deep: #1e3a8a;
+  --line: #e2e8f0;
+  --ink: #0f172a;
 }
-#app-header h1 {
-  font-size: 1.9rem;
-  font-weight: 800;
-  margin-bottom: 0.2rem;
-  color: #ffffff;
-  letter-spacing: 0.12em;
+
+/* 全局：背景与聚焦感（大屏演示限宽居中） */
+html, body {
+  color-scheme: light !important;
 }
-#app-header p {
-  color: #dbeafe;
-  font-size: 0.9rem;
-  margin-top: 0;
-}
-.side-card, .chat-card {
-  background: #ffffff;
-  border: 1px solid #e2e8f0;
-  border-radius: 10px;
-  padding: 0.7rem 0.9rem;
-  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.05);
-}
-.side-card h3 {
-  color: #ffffff;
-  background: linear-gradient(90deg, #1d4ed8, #2563eb);
-  font-size: 0.98rem;
-  font-weight: 700;
-  margin: 0 0 0.6rem 0;
-  padding: 0.5rem 0.8rem;
-  border-radius: 8px;
-  border-bottom: none;
+/* 双保险：即使系统深色偏好触发 dark class，关键变量仍强制浅色 */
+.dark {
+  --background-fill-primary: #f8fafc !important;
+  --background-fill-secondary: #ffffff !important;
+  --body-background-fill: #f8fafc !important;
+  --block-background-fill: #ffffff !important;
+  --block-border-color: #e2e8f0 !important;
+  --input-background-fill: #ffffff !important;
+  --body-text-color: #0f172a !important;
+  --block-label-text-color: #0f172a !important;
+  --block-title-text-color: #0f172a !important;
+  --button-secondary-background-fill: #ffffff !important;
+  --button-secondary-border-color: #e2e8f0 !important;
+  --button-secondary-text-color: #0f172a !important;
 }
 body {
   background: #f8fafc !important;
 }
+.gradio-container {
+  color-scheme: light;
+  max-width: 1440px !important;
+  margin: 0 auto !important;
+  background: #f8fafc !important;
+  --background-fill-primary: #f8fafc !important;
+  --background-fill-secondary: #ffffff !important;
+  --body-background-fill: #f8fafc !important;
+  --block-background-fill: #ffffff !important;
+  --block-border-color: #e2e8f0 !important;
+  --input-background-fill: #ffffff !important;
+  --body-text-color: #0f172a !important;
+  --panel-background-fill: #ffffff !important;
+  --block-label-text-color: #0f172a !important;
+  --block-title-text-color: #0f172a !important;
+  --block-info-text-color: #64748b !important;
+  --button-secondary-background-fill: #ffffff !important;
+  --button-secondary-background-fill-hover: #f1f5f9 !important;
+  --button-secondary-border-color: #e2e8f0 !important;
+  --button-secondary-text-color: #0f172a !important;
+}
+
+/* Header：沉稳深蓝、细描边、警示细条点睛 */
+#app-header {
+  text-align: center;
+  padding: 1.5rem 1rem 1.4rem;
+  background: linear-gradient(135deg, #1e3a8a 0%, #1d4ed8 60%, #2563eb 100%);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 14px;
+  margin-bottom: 1rem;
+  box-shadow: 0 4px 18px -6px rgba(30, 58, 138, 0.4), 0 1px 2px rgba(15, 23, 42, 0.06);
+  position: relative;
+  overflow: hidden;
+}
+#app-header::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 3px;
+  background: linear-gradient(90deg, #f59e0b 0%, #fbbf24 30%, #1d4ed8 30%, #2563eb 100%);
+}
+#app-header h1 {
+  font-size: 1.85rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  color: #ffffff;
+  margin-bottom: 0.25rem;
+  text-shadow: 0 1px 2px rgba(15, 23, 42, 0.25);
+}
+#app-header p {
+  color: #dbeafe;
+  font-size: 0.88rem;
+  letter-spacing: 0.02em;
+  margin: 0;
+}
+
+/* 卡片：统一圆角、细边、轻阴影 */
+.side-card, .chat-card {
+  background: #ffffff;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 0.75rem 1rem;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04), 0 4px 14px -8px rgba(15, 23, 42, 0.08);
+}
+.side-card h3 {
+  color: #ffffff;
+  background: linear-gradient(90deg, var(--brand-deep), var(--brand));
+  font-size: 0.95rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  margin: 0 0 0.7rem 0;
+  padding: 0.5rem 0.8rem;
+  border-radius: 8px;
+}
+
+/* 按钮：一致圆角/字重/状态微动效 */
 .gr-button {
   border-radius: 8px !important;
-  font-weight: 500 !important;
+  font-weight: 600 !important;
+  transition: transform 160ms ease, box-shadow 160ms ease, background-color 160ms ease !important;
 }
+/* 兜底：次级按钮强制浅色（防深色模式残留） */
+button.gr-button:not(.primary):not([class*="primary"]) {
+  background-color: #ffffff !important;
+  color: #0f172a !important;
+  border: 1px solid #e2e8f0 !important;
+}
+button.gr-button.primary, button.gr-button[class*="primary"] {
+  background-color: var(--button-primary-background-fill, #1d4ed8) !important;
+  color: #ffffff !important;
+  border: 1px solid transparent !important;
+}
+button.gr-button:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 10px -2px rgba(30, 58, 138, 0.25);
+}
+button.gr-button:active:not(:disabled) {
+  transform: translateY(0);
+}
+button:focus-visible {
+  outline: 2px solid var(--brand) !important;
+  outline-offset: 2px;
+}
+
+/* 依据条款/回答中的关键词高亮 */
+.markdown strong {
+  color: var(--brand-deep);
+  font-weight: 700;
+}
+
+/* 折叠区：白底细边、标题加粗 */
+details.gr-accordion {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #ffffff;
+  padding: 0 0.6rem;
+}
+details.gr-accordion > summary {
+  font-weight: 600;
+  color: var(--ink);
+  padding: 0.5rem 0.2rem;
+}
+
+/* 文本选择与滚动条（浏览器表面） */
+::selection {
+  background: #bfdbfe;
+  color: #0f172a;
+}
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 5px;
+  border: 2px solid #f8fafc;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* 表格数字等宽 */
+table td, table th, .dataframe td, .dataframe th {
+  font-variant-numeric: tabular-nums;
+}
+
 footer { display: none !important; }
 """
 
@@ -1003,7 +1140,7 @@ theme = gr.themes.Soft(
     font=[gr.themes.GoogleFont("Inter"), "Microsoft YaHei", "sans-serif"],
 )
 
-with gr.Blocks(title="智安查 · 建造安全智能问答") as demo:
+with gr.Blocks(title="智安查 · 建造安全智能问答", mode="light") as demo:
     gr.HTML("""
     <div id="app-header">
       <h1>智安查</h1>
