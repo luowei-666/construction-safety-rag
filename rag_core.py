@@ -55,22 +55,20 @@ def dashscope_embedding(text: str):
     return data["output"]["embeddings"][0]["embedding"]
 
 
-def dashscope_chat(messages, model="qwen-turbo"):
-    """非流式调用，返回完整回答"""
-    url = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation"
+def dashscope_chat(messages, model="qwen3.8-flash"):
+    """非流式调用，返回完整回答（OpenAI 兼容端点）"""
+    url = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {DASHSCOPE_API_KEY}",
         "Content-Type": "application/json"
     }
     payload = {
         "model": model,
-        "input": {"messages": messages},
-        "parameters": {"result_format": "message"}
+        "messages": messages,
     }
     resp = requests.post(url, headers=headers, json=payload, timeout=60)
     resp.raise_for_status()
-    j = resp.json()
-    return j["output"]["choices"][0]["message"]["content"].strip()
+    return resp.json()["choices"][0]["message"]["content"].strip()
 
 
 def dashscope_rerank(query, documents, top_n=5, model="gte-rerank-v2"):
@@ -186,27 +184,30 @@ def dashscope_tts(text, model="sambert-zhichu-v1"):
         return None
 
 
-def dashscope_chat_stream(messages, model="qwen-turbo"):
-    """流式调用，逐字返回"""
-    url = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation"
+def dashscope_chat_stream(messages, model="qwen3.8-flash"):
+    """流式调用，逐字返回（OpenAI 兼容端点 SSE）"""
+    url = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {DASHSCOPE_API_KEY}",
         "Content-Type": "application/json"
     }
     payload = {
         "model": model,
-        "input": {"messages": messages},
-        "parameters": {"result_format": "message", "incremental_output": True}
+        "messages": messages,
+        "stream": True,
     }
     resp = requests.post(url, headers=headers, json=payload, timeout=60, stream=True)
     for line in resp.iter_lines():
         if not line:
             continue
         raw = line.decode("utf-8").removeprefix("data:")
+        if raw == "[DONE]":
+            break
         try:
             j = json.loads(raw)
-            chunk = j["output"]["choices"][0]["message"]["content"]
-            yield chunk
+            delta = j["choices"][0].get("delta", {}).get("content", "")
+            if delta:
+                yield delta
         except Exception:
             continue
 
@@ -507,7 +508,7 @@ def _image_to_data_uri(image_path):
     return f"data:image/{mime};base64,{b64}"
 
 
-def dashscope_vl(messages, model="qwen-vl-plus", timeout=90):
+def dashscope_vl(messages, model="qwen3.7-plus", timeout=90):
     """通义千问视觉模型（OpenAI 兼容接口），返回完整回答"""
     url = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
     headers = {
@@ -520,7 +521,7 @@ def dashscope_vl(messages, model="qwen-vl-plus", timeout=90):
     return resp.json()["choices"][0]["message"]["content"].strip()
 
 
-def describe_image_hazard(image_path, model="qwen-vl-plus"):
+def describe_image_hazard(image_path, model="qwen3.7-plus"):
     """识别现场照片中的安全隐患，返回文字描述（供检索与风险分析使用）"""
     data_uri = _image_to_data_uri(image_path)
     prompt = (
@@ -538,7 +539,7 @@ def describe_image_hazard(image_path, model="qwen-vl-plus"):
 
 def analyze_image_risk(image_path, index, chunks_with_source, bm25, top_k=5,
                        dist_threshold=0.85, use_hybrid=True, weight_bm25=0.25,
-                       use_rerank=False, model="qwen-turbo", vl_model="qwen-vl-plus"):
+                       use_rerank=False, model="qwen3.8-flash", vl_model="qwen3.7-plus"):
     """现场照片隐患分析：先视觉识别隐患描述，再走规范检索 + 结构化风险分析。
 
     返回 analyze_risk 的结果，并附带 _image_desc（视觉识别出的隐患描述）。
@@ -555,7 +556,7 @@ def analyze_image_risk(image_path, index, chunks_with_source, bm25, top_k=5,
 # ---------- 隐患风险结构化分析 ----------
 def analyze_risk(question, index, chunks_with_source, bm25, top_k=5,
                  dist_threshold=0.85, use_hybrid=True, weight_bm25=0.25,
-                 use_rerank=False, model="qwen-turbo"):
+                 use_rerank=False, model="qwen3.8-flash"):
     """对施工现场隐患描述做结构化风险分析（决策辅助层）。
 
     流程：混合检索规范条款（可选 Rerank 重排）→ LLM 按固定 JSON 结构输出风险等级/依据/整改建议。

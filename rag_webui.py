@@ -41,9 +41,9 @@ risk_records = []  # 本次会话的风险分析记录，用于生成安全检�
 
 
 MODEL_MAP = {
-    "qwen-turbo（默认，快）": "qwen-turbo",
-    "qwen-plus（更准）": "qwen-plus",
-    "qwen-max（最强）": "qwen-max",
+    "qwen3.8-flash（默认，快）": "qwen3.8-flash",
+    "qwen3.7-plus（更准）": "qwen3.7-plus",
+    "qwen3.8-max（最强）": "qwen3.8-max",
 }
 
 
@@ -991,8 +991,8 @@ with gr.Blocks(title="智安查 · 建造安全智能问答") as demo:
                     value=True,
                 )
                 model_dropdown = gr.Dropdown(
-                    choices=["qwen-turbo（默认，快）", "qwen-plus（更准）", "qwen-max（最强）"],
-                    value="qwen-turbo（默认，快）",
+                    choices=["qwen3.8-flash（默认，快）", "qwen3.7-plus（更准）", "qwen3.8-max（最强）"],
+                    value="qwen3.8-flash（默认，快）",
                     label="问答模型",
                 )
 
